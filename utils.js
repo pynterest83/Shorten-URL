@@ -20,19 +20,26 @@ function makeID(length) {
     return result;
 }
 
-function findOrigin(id) {
-    return new Promise((resolve, reject) => {
-        return db.get(`SELECT * FROM data WHERE id = ?`, [id], function (err, res) {
-            if (err) {
-                return reject(err.message);
-            }
-            if (res != undefined) {
-                return resolve(res.url);
-            } else {
-                return resolve(null);
-            }
-        });
-    });
+function findOrigin(id, memJsClient) {
+    return new Promise(async (resolve, reject) => {
+        let result = await memJsClient.get(id)
+        if (result.value) {
+            return resolve(result.value.toString())
+        } else {
+            db.get(`SELECT * FROM data WHERE id = ?`, [id], function (err, res) {
+                if (err) {
+                    return reject(err.message);
+                }
+                if (res !== undefined) {
+                    memJsClient.set(id, res.url).then()
+                    return resolve(res.url);
+                } else {
+                    return resolve(null);
+                }
+            });
+
+        }
+    })
 }
 
 function create(id, url) {
@@ -47,16 +54,15 @@ function create(id, url) {
 }
 
 async function shortUrl(url) {
-    while (true) {
-        let newID = makeID(5);
-        let originUrl = await findOrigin(newID);
-        if (originUrl == null);
-        await create(newID, url)
-        return newID;
-    }
+    let newID = makeID(5);
+    let originUrl = await findOrigin(newID);
+    if (originUrl == null) await create(newID, url)
+    return newID;
 }
 
+let mem_js = require('memjs')
 module.exports = {
     findOrigin,
-    shortUrl
+    shortUrl,
+    mem_js
 }
