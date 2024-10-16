@@ -33,7 +33,7 @@ if (cluster.isPrimary) {
     app.post('/create', async (req, res) => {
         try {
             const url = req.query.url;
-            const newID = await lib.shortUrl(url);
+            const newID = await lib.shortUrl(url, memJsClient);
             res.send(newID);
 
         } catch (err) {

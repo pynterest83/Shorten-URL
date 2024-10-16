@@ -53,9 +53,9 @@ function create(id, url) {
     });
 }
 
-async function shortUrl(url) {
+async function shortUrl(url, memJsClient) {
     let newID = makeID(5);
-    let originUrl = await findOrigin(newID);
+    let originUrl = await findOrigin(newID, memJsClient);
     if (originUrl == null) await create(newID, url)
     return newID;
 }
