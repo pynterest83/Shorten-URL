@@ -9,6 +9,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "cassandra-driver": "^4.7.2",
+    "crypto": "^1.0.1",
     "hyper-express": "^6.17.2",
     "memjs": "^1.3.2",
     "sqlite3": "^5.1.7"

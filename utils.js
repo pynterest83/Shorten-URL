@@ -1,68 +1,68 @@
-const sqlite3 = require('sqlite3').verbose();
-const db = new sqlite3.Database('./db/app.db');
+const cassandra = require('cassandra-driver');
 
-db.run(`
-        CREATE TABLE IF NOT EXISTS data(
-        id TEXT,
-        url TEXT
-        ) STRICT
-`);
+// Create Cassandra client
+const client = new cassandra.Client({
+    contactPoints: ['127.0.0.1'], // Replace with your ScyllaDB IP if necessary
+    localDataCenter: 'datacenter1',
+    keyspace: 'shortenurl'
+});
 
+// Utility function to generate random ID
 function makeID(length) {
     let result = '';
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     const charactersLength = characters.length;
-    let counter = 0;
-    while (counter < length) {
+    for (let i = 0; i < length; i++) {
         result += characters.charAt(Math.floor(Math.random() * charactersLength));
-        counter += 1;
     }
     return result;
 }
 
-function findOrigin(id, memJsClient) {
-    return new Promise(async (resolve, reject) => {
-        let result = await memJsClient.get(id)
-        if (result.value) {
-            return resolve(result.value.toString())
-        } else {
-            db.get(`SELECT * FROM data WHERE id = ?`, [id], function (err, res) {
-                if (err) {
-                    return reject(err.message);
-                }
-                if (res !== undefined) {
-                    memJsClient.set(id, res.url).then()
-                    return resolve(res.url);
-                } else {
-                    return resolve(null);
-                }
-            });
-
+// Function to find the original URL
+async function findOrigin(id, memJsClient) {
+    try {
+        const cachedResult = await memJsClient.get(id);
+        if (cachedResult.value) {
+            return cachedResult.value.toString();
         }
-    })
+
+        const query = 'SELECT url FROM urls WHERE id = ?';
+        const result = await client.execute(query, [id], { prepare: true });
+
+        if (result.rows.length > 0) {
+            const url = result.rows[0].url;
+            await memJsClient.set(id, url);
+            return url;
+        } else {
+            return null;
+        }
+    } catch (error) {
+        throw new Error(error);
+    }
 }
 
-function create(id, url) {
-    return new Promise((resolve, reject) => {
-        return db.run(`INSERT INTO data VALUES (?, ?)`, [id, url], function (err) {
-            if (err) {
-                return reject(err.message);
-            }
-            return resolve(id);
-        });
-    });
+// Function to create a short URL
+async function create(id, url) {
+    try {
+        const query = 'INSERT INTO urls (id, url) VALUES (?, ?)';
+        await client.execute(query, [id, url], { prepare: true });
+        return id;
+    } catch (error) {
+        throw new Error(error);
+    }
 }
 
+// Function to shorten the URL
 async function shortUrl(url, memJsClient) {
-    let newID = makeID(5);
-    let originUrl = await findOrigin(newID, memJsClient);
-    if (originUrl == null) await create(newID, url)
+    const newID = makeID(5);
+    const originUrl = await findOrigin(newID, memJsClient);
+    if (!originUrl) {
+        await create(newID, url);
+    }
     return newID;
 }
 
-let mem_js = require('memjs')
 module.exports = {
     findOrigin,
-    shortUrl,
-    mem_js
-}
+    shortUrl
+};
