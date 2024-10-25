@@ -36,18 +36,18 @@ func GetLink(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	id := mux.Vars(r)["id"]
 	var url string
-	err := Session.Query("select url from urls where id = ? limit 1", id).WithContext(context.Background()).Consistency(gocql.One).Scan(&url)
+	url, err := Cache.Get(context.Background(), id).Result()
 	if err != nil {
-		url, err = Cache.Get(context.Background(), id).Result()
+		err := Session.Query("select url from urls where id = ? limit 1", id).WithContext(context.Background()).Consistency(gocql.One).Scan(&url)
 		if err != nil {
 			w.WriteHeader(404)
 			return
 		} else {
+			_ = Cache.Set(context.Background(), id, url, 0)
 			_, err = w.Write([]byte(url))
 			return
 		}
 	} else {
-		_ = Cache.Set(context.Background(), id, url, 0)
 		_, err = w.Write([]byte(url))
 		return
 	}
