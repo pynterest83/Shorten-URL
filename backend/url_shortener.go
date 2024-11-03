@@ -26,25 +26,29 @@ func NewURLShortener(db *gocql.Session, cache *redis.Client) *URLShortener {
 
 // GetLink retrieves the original URL from a shortened ID
 func (s *URLShortener) GetLink(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
 	id := mux.Vars(r)["id"]
 
 	var url string
+	// First, attempt to get the URL from the cache
 	url, err := s.cache.Get(context.Background(), id).Result()
 	if err == redis.Nil {
+		// If not found in cache, query the database
 		stmt, names := qb.Select("urls").Columns("url").Where(qb.Eq("id")).Limit(1).ToCql()
 		q := gocqlx.Query(s.db.Query(stmt), names).BindMap(qb.M{"id": id})
-		err := q.GetRelease(&url)
+		err = q.GetRelease(&url)
+
 		if err != nil {
+			// If the URL is not found in the database, return a 404 status
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+
+		// Store the URL in the cache for future requests
 		s.cache.Set(context.Background(), id, url, 0)
 	}
 
-	if _, err := w.Write([]byte(url)); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+	// Redirect to the original URL
+	http.Redirect(w, r, url, http.StatusFound)
 }
 
 // ShortenURL creates a new shortened URL ID

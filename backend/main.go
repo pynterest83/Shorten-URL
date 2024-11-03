@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net/http"
+
+	"github.com/rs/cors"
 )
 
 func main() {
@@ -21,9 +23,16 @@ func main() {
 	urlShortener := NewURLShortener(session, cache)
 	app := NewApplication(urlShortener)
 
-	// Start the server
-	fmt.Println("Server started at :3000")
-	if err := http.ListenAndServe(":3000", app.Router); err != nil {
+	// Create a new CORS handler
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},  // Allow your frontend origin
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"}, // Allow specific methods
+		AllowCredentials: true,
+	})
+
+	// Start the server with CORS
+	fmt.Println("Server started at :8080")
+	if err := http.ListenAndServe(":8080", corsHandler.Handler(app.Router)); err != nil {
 		fmt.Println("Failed to start server:", err)
 	}
 }
