@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, useParams } from 'react-router-dom';
 import './App.css';
 
-function App() {
+function URLShortener() {
   const [url, setUrl] = useState('');
   const [alias, setAlias] = useState('');
   const [shortenedURLList, setShortenedURLList] = useState([]);
@@ -24,7 +25,7 @@ function App() {
   
       if (response.ok) {
         const newID = await response.text(); // Assuming the backend returns the new ID as plain text
-        const shortened = `http://localhost:8080/short/${newID}`; // Use the newID received
+        const shortened = `http://localhost:3000/short/${newID}`; // Use the newID received
         setShortenedURLList([...shortenedURLList, { fullUrl: url, shortUrl: shortened, shortId: newID}]); // Store newID directly
         setUrl('');
         setAlias('');
@@ -48,7 +49,7 @@ function App() {
       navigator.share({
         title: 'Shortened URL',
         text: 'Check out this URL!',
-        url: `http://localhost:8080/short/${shortId}`, // Change to backend link
+        url: `http://localhost:3000/short/${shortId}`, // Change to backend link
       });
     } else {
       alert('Share not supported on this browser.');
@@ -56,8 +57,8 @@ function App() {
   };
 
   const handleCopy = (shortId) => {
-    navigator.clipboard.writeText(`http://localhost:8080/short/${shortId}`);
-    alert(`Copied: http://localhost:8080/short/${shortId}`);
+    navigator.clipboard.writeText(`http://localhost:3000/short/${shortId}`);
+    alert(`Copied: http://localhost:3000/short/${shortId}`);
   };
   
   const handleDelete = (index) => {
@@ -87,7 +88,7 @@ function App() {
           />
           <div className="custom-link">
             <select>
-              <option value="localhost:8080">localhost:8080</option>
+              <option value="localhost:3000">localhost:3000</option>
             </select>
             <input
               type="text"
@@ -120,7 +121,7 @@ function App() {
                         </a>
                       </td>
                       <td>
-                        <a href={`http://localhost:8080/short/${shortened.shortId}`} target="_blank" rel="noopener noreferrer">
+                        <a href={`http://localhost:3000/short/${shortened.shortId}`} target="_blank" rel="noopener noreferrer">
                           {shortened.shortUrl}
                         </a>
                       </td>
@@ -140,6 +141,53 @@ function App() {
         )}
       </div>
     </div>
+  );
+}
+
+function RedirectShort() {
+  const { id } = useParams();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchOriginalUrl = async () => {
+      try {
+        const response = await fetch(`http://localhost:8080/short/${id}`);
+        if (response.ok) {
+          const data = await response.json();
+          window.location.replace(data.originalUrl);
+        } else {
+          setError('URL not found');
+        }
+      } catch (err) {
+        setError('Failed to fetch URL');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchOriginalUrl();
+  }, [id]);
+
+  if (loading) {
+    return <div>Redirecting...</div>;
+  }
+
+  if (error) {
+    return <div>Error: {error}</div>;
+  }
+
+  return null;
+}
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<URLShortener />} />
+        <Route path="/short/:id" element={<RedirectShort />} />
+      </Routes>
+    </Router>
   );
 }
 
