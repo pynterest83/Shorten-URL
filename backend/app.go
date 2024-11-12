@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
+	"net/http"
+
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/cors"
 	"gorm.io/driver/postgres"
 	_ "gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"math/rand/v2"
-	"net/http"
 )
 
 var RedisClient *redis.Client
@@ -39,11 +41,23 @@ func main() {
 		panic(err)
 	}
 
-	// Set up the router
+	// Set up the router with CORS
 	router := mux.NewRouter()
 	router.HandleFunc("/short/{id}", GetLink)
 	router.HandleFunc("/create", ShortenURL)
-	if http.ListenAndServe(":8080", router) != nil {
+
+	// Configure CORS
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowCredentials: true,
+	})
+
+	// Wrap router with CORS middleware
+	handler := corsHandler.Handler(router)
+
+	// Start server with CORS-enabled handler
+	if http.ListenAndServe(":8080", handler) != nil {
 		return
 	}
 }
