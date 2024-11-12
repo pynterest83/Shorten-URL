@@ -3,24 +3,43 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"github.com/bradfitz/gomemcache/memcache"
+	"errors"
 	"github.com/gorilla/mux"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/driver/postgres"
+	_ "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 	"math/rand/v2"
 	"net/http"
 )
 
-var Cache *memcache.Client
-var Database *pgxpool.Pool
+var RedisClient *redis.Client
+var DB *gorm.DB
+var ctx = context.Background()
+
+// URL model for GORM
+type URL struct {
+	ID  string `gorm:"primary_key"`
+	URL string `gorm:"not null"`
+}
 
 func main() {
-	Cache = memcache.New("localhost:11211")
+	RedisClient = redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		DB:   0,
+	})
+
+	if _, err := RedisClient.Ping(ctx).Result(); err != nil {
+		panic(err)
+	}
+
 	var err error
-	Database, err = pgxpool.New(context.Background(), "postgresql://shortenurl:shortenurl@localhost:5432/shortenurl?pool_max_conns=95")
+	DB, err = gorm.Open(postgres.Open("host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"))
 	if err != nil {
 		panic(err)
 	}
 
+	// Set up the router
 	router := mux.NewRouter()
 	router.HandleFunc("/short/{id}", GetLink)
 	router.HandleFunc("/create", ShortenURL)
@@ -28,39 +47,56 @@ func main() {
 		return
 	}
 }
+
+// GetLink handles the request to fetch the original URL based on the shortened ID
 func GetLink(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
-	var url []byte
-	data, err := Cache.Get(id)
-	if err != nil {
-		err = Database.QueryRow(context.Background(), "select url from urls where id = $1", id).Scan(&url)
-		if err != nil {
+
+	data, err := RedisClient.Get(ctx, id).Result()
+	if errors.Is(err, redis.Nil) {
+		var url URL
+		if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
 			w.WriteHeader(404)
 			return
-		} else {
-			_ = Cache.Set(&memcache.Item{Key: id, Value: url})
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": string(url)})
 		}
+
+		_ = RedisClient.Set(ctx, id, url.URL, 0).Err()
+
+		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
+	} else if err != nil {
+		w.WriteHeader(500)
+		return
 	} else {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": string(data.Value)})
+		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
 	}
 }
 
+// ShortenURL handles the request to shorten a given URL
 func ShortenURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+
 	url := r.URL.Query().Get("url")
-	newID := makeID(5)
-	tag, err := Database.Exec(context.Background(), "insert into urls(id, url) values($1, $2) on conflict do nothing", newID, url)
-	if err != nil || tag.RowsAffected() == 0 {
-		w.WriteHeader(500)
+	if url == "" {
+		w.WriteHeader(400) // Bad Request if no URL is provided
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain")
+
+	// Generate a new unique ID for the shortened URL
+	newID := makeID(5)
+
+	// Insert the new URL into the database using GORM
+	urlRecord := URL{ID: newID, URL: url}
+	if err := DB.Create(&urlRecord).Error; err != nil {
+		w.WriteHeader(500) // Internal Server Error if something goes wrong
+		return
+	}
+
+	// Return the shortened URL ID
 	_, _ = w.Write([]byte(newID))
 }
 
+// makeID generates a random alphanumeric string of the specified length
 func makeID(length int) string {
 	var result string
 	const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
