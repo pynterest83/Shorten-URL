@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"github.com/alphadose/haxmap"
-	"github.com/gorilla/mux"
+	"github.com/julienschmidt/httprouter"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
 	"gorm.io/driver/postgres"
@@ -45,16 +45,15 @@ func main() {
 
 	go processQueue()
 
-	router := mux.NewRouter()
-	router.HandleFunc("/short/{id}", GetLink)
-	router.HandleFunc("/create", ShortenURL)
+	router := httprouter.New()
+	router.GET("/short/:id", GetLink)
+	router.POST("/create", ShortenURL)
 
 	corsHandler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowCredentials: true,
 	})
-
 	handler := corsHandler.Handler(router)
 	if http.ListenAndServe(":8080", handler) != nil {
 		return
@@ -70,12 +69,13 @@ func MergeRequest(id string, channel chan<- []byte) {
 	task, exist := WorkerTasks.GetOrSet(id, &WorkerTask{
 		waiters: make([]chan<- []byte, 0),
 	})
-	if !exist {
-		go TaskStart(id, task)
-	}
 	task.mutex.Lock()
 	task.waiters = append(task.waiters, channel)
 	task.mutex.Unlock()
+	if !exist {
+		go TaskStart(id, task)
+	}
+
 }
 
 func TaskStart(id string, task *WorkerTask) {
@@ -92,7 +92,7 @@ func TaskStart(id string, task *WorkerTask) {
 	} else {
 		result = []byte(data)
 	}
-	time.Sleep(45 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 	WorkerTasks.Del(id)
 	for _, waiter := range task.waiters {
 		waiter <- result
@@ -100,9 +100,9 @@ func TaskStart(id string, task *WorkerTask) {
 }
 
 // GetLink handles the request to fetch the original URL based on the shortened ID
-func GetLink(w http.ResponseWriter, r *http.Request) {
+func GetLink(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
 	w.Header().Set("Content-Type", "application/json")
-	id := mux.Vars(r)["id"]
+	id := ps.ByName("id")
 	var waiter sync.WaitGroup
 	waiter.Add(1)
 	go func() {
@@ -116,9 +116,8 @@ func GetLink(w http.ResponseWriter, r *http.Request) {
 }
 
 // ShortenURL handles the request to shorten a given URL
-func ShortenURL(w http.ResponseWriter, r *http.Request) {
+func ShortenURL(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	w.Header().Set("Content-Type", "text/plain")
-
 	url := r.FormValue("url")
 	if url == "" {
 		w.WriteHeader(400) // Bad Request if no URL is provided
