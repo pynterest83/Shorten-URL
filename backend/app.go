@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math/rand"
+	"flag"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
@@ -28,6 +30,9 @@ type URL struct {
 var urlQueue = make(chan URL, 5000) // Channel hàng đợi với buffer 5000
 
 func main() {
+	port := flag.String("port", "8080", "Port for the server to listen on")
+	flag.Parse()
+
 	// Khởi tạo Redis
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
@@ -76,8 +81,9 @@ func main() {
 	// Wrap router with CORS middleware
 	handler := corsHandler.Handler(router)
 
-	// Start server with CORS-enabled handler
-	if http.ListenAndServe(":8080", handler) != nil {
+	// Start server with CORS-enabled handler and specified port
+	fmt.Printf("Starting server on port %s...\n", *port)
+	if http.ListenAndServe(":"+*port, handler) != nil {
 		return
 	}
 }
@@ -121,7 +127,7 @@ func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate a new unique ID for the shortened URL
-	newID := makeID(10)
+	newID := makeID()
 
 	// Đưa bản ghi vào hàng đợi thay vì ghi trực tiếp vào cơ sở dữ liệu
 	urlRecord := URL{ID: newID, URL: url}
@@ -173,16 +179,11 @@ func batchInsert(urls []URL) {
 }
 
 // makeID generates a random alphanumeric string of the specified length
-func makeID(length int) string {
-	var result string
-	const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	for i := 0; i < length; i++ {
-		result += string(characters[rand.Intn(len(characters))])
-	}
-	return result
+func makeID() string {
+	return uuid.New().String()
 }
 
-func deleteAllURLsHandler(w http.ResponseWriter, r *http.Request) {
+func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
 	if err := deleteAllRecords(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("Failed to delete records"))
