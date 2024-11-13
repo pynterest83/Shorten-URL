@@ -25,9 +25,10 @@ type URL struct {
 	URL string `gorm:"not null"`
 }
 
-var urlQueue = make(chan URL, 1000) // Channel hàng đợi với buffer 1000
+var urlQueue = make(chan URL, 5000) // Channel hàng đợi với buffer 5000
 
 func main() {
+	// Khởi tạo Redis
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
@@ -37,19 +38,33 @@ func main() {
 		panic(err)
 	}
 
+	// Khởi tạo kết nối với cơ sở dữ liệu và thiết lập pool
 	var err error
-	DB, err = gorm.Open(postgres.Open("host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"))
+	dsn := "host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"
+	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		PrepareStmt:            true,
+		SkipDefaultTransaction: true,
+	})
 	if err != nil {
 		panic(err)
 	}
 
-	// Khởi tạo worker để xử lý queue
-	go processQueue()
+	// Thiết lập pool cho kết nối database
+	//sqlDB, _ := DB.DB()
+	//sqlDB.SetMaxOpenConns(20)                 // Số kết nối tối đa có thể mở cùng lúc
+	//sqlDB.SetMaxIdleConns(10)                 // Số kết nối nhàn rỗi tối đa
+	//sqlDB.SetConnMaxLifetime(2 * time.Minute) // Thời gian sống tối đa cho một kết nối
+
+	// Khởi tạo các worker để xử lý hàng đợi
+	for i := 0; i < 3; i++ {
+		go processQueue()
+	}
 
 	// Set up the router with CORS
 	router := mux.NewRouter()
-	router.HandleFunc("/short/{id}", GetLink)
-	router.HandleFunc("/create", ShortenURL)
+	router.HandleFunc("/short/{id}", GetLink).Methods("GET")
+	router.HandleFunc("/create", ShortenURL).Methods("POST")
+	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE")
 
 	// Configure CORS
 	corsHandler := cors.New(cors.Options{
@@ -72,21 +87,25 @@ func GetLink(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
 
+	// Kiểm tra trong Redis cache
 	data, err := RedisClient.Get(ctx, id).Result()
 	if errors.Is(err, redis.Nil) {
+		// Nếu không tìm thấy trong cache, tìm trong cơ sở dữ liệu
 		var url URL
 		if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
-			w.WriteHeader(404)
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		_ = RedisClient.Set(ctx, id, url.URL, 0).Err()
+		// Lưu vào cache Redis với TTL (thời gian sống) là 5 phút
+		_ = RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err()
 
 		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
 	} else if err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	} else {
+		// Nếu tìm thấy trong cache, trả về dữ liệu từ Redis
 		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
 	}
 }
@@ -114,8 +133,8 @@ func ShortenURL(w http.ResponseWriter, r *http.Request) {
 
 // processQueue xử lý các yêu cầu từ hàng đợi và ghi vào cơ sở dữ liệu
 func processQueue() {
-	batchSize := 500
-	ticker := time.NewTicker(1500 * time.Millisecond)
+	batchSize := 200
+	ticker := time.NewTicker(1000 * time.Millisecond)
 	defer ticker.Stop()
 
 	var urls []URL
@@ -149,7 +168,7 @@ func batchInsert(urls []URL) {
 		println("Batch insert failed:", err.Error())
 	} else {
 		totalInserts += len(urls)
-		println("Total URLs inserted:", totalInserts)
+		//println("Total URLs inserted:", totalInserts)
 	}
 }
 
@@ -161,4 +180,22 @@ func makeID(length int) string {
 		result += string(characters[rand.Intn(len(characters))])
 	}
 	return result
+}
+
+func deleteAllURLsHandler(w http.ResponseWriter, r *http.Request) {
+	if err := deleteAllRecords(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Failed to delete records"))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("All records deleted successfully"))
+}
+
+func deleteAllRecords() error {
+	if err := DB.Unscoped().Where("1 = 1").Delete(&URL{}).Error; err != nil {
+		return err
+	}
+	println("All records deleted from URL table")
+	return nil
 }
