@@ -5,11 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
-	"time"
 
 	"math/rand"
 	"net/http"
@@ -39,7 +36,7 @@ var urlQueue = make(chan URL, 1000) // Channel hàng đợi với buffer 1000
 
 func main() {
 	// Port flag
-	port := flag.Int("port", 8081, "Port to run the server on")
+	port := flag.Int("port", 8080, "Port to run the server on")
 	flag.Parse()
 
 	RedisClient = redis.NewClient(&redis.Options{
