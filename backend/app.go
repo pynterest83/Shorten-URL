@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
+	"os"
+	"os/signal"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -28,6 +33,10 @@ type URL struct {
 var urlQueue = make(chan URL, 1000) // Channel hàng đợi với buffer 1000
 
 func main() {
+	// Port flag
+	port := flag.Int("port", 8081, "Port to run the server on")
+	flag.Parse()
+
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
@@ -53,17 +62,42 @@ func main() {
 
 	// Configure CORS
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:80"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowCredentials: true,
+		AllowedHeaders:   []string{"Content-Type"},
 	})
 
 	// Wrap router with CORS middleware
 	handler := corsHandler.Handler(router)
 
-	// Start server with CORS-enabled handler
-	if http.ListenAndServe(":8080", handler) != nil {
-		return
+	// Create server with configured port
+	srv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", *port),
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+	}
+
+	// Start server in goroutine
+	go func() {
+		log.Printf("Starting server on port %d", *port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt)
+	<-stop
+
+	// Graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
 	}
 }
 
