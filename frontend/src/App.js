@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, useParams } from 'react-router-dom';
 import './App.css';
-import { Trash2, Edit, Copy, Share } from 'lucide-react';
+import { Trash2, Copy, Share } from 'lucide-react';
 
 function URLShortener() {
   const [url, setUrl] = useState('');
@@ -119,15 +119,6 @@ function URLShortener() {
     }
   };
 
-  const handleEdit = (index) => {
-    const editedUrl = prompt("Enter new URL:", shortenedURLList[index].fullUrl);
-    if (editedUrl) {
-      const updatedList = [...shortenedURLList];
-      updatedList[index].fullUrl = editedUrl;
-      setShortenedURLList(updatedList);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-gray-100 p-4 md:p-8">
       <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-6">
@@ -185,13 +176,6 @@ function URLShortener() {
                       </td>
                       <td className="p-2">
                         <div className="flex space-x-2">
-                          <button
-                            onClick={() => handleEdit(index)}
-                            className="p-1 bg-blue-500 text-white rounded hover:bg-blue-600"
-                            aria-label="Edit"
-                          >
-                            <Edit size={16} />
-                          </button>
                           <button
                             onClick={() => handleDelete(index)}
                             className="p-1 bg-red-500 text-white rounded hover:bg-red-600"

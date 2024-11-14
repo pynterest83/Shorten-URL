@@ -130,7 +130,8 @@ func TaskStart(id string, task *WorkerTask) {
 			result = nil
 		} else {
 			result = []byte(url.URL)
-			_ = RedisClient.Set(ctx, id, url.URL, 0).Err()
+			// Set cache with a 24-hour expiration time
+			_ = RedisClient.Set(ctx, id, url.URL, 24*time.Hour).Err()
 		}
 	} else {
 		result = []byte(data)
