@@ -9,12 +9,12 @@ import (
 	"os"
 	"os/signal"
 
-	"math/rand"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/alphadose/haxmap"
+	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
@@ -55,11 +55,14 @@ func main() {
 		panic(err)
 	}
 
-	go processQueue()
+	for i := 0; i < 3; i++ {
+		go processQueue()
+	}
 
 	router := httprouter.New()
 	router.GET("/short/:id", GetLink)
 	router.POST("/create", ShortenURL)
+	router.DELETE("/delete-all", deleteAllURLsHandler)
 
 	corsHandler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:80"},
@@ -169,7 +172,7 @@ func ShortenURL(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	}
 
 	// Generate a new unique ID for the shortened URL
-	newID := makeID(10)
+	newID := makeID()
 
 	// Đưa bản ghi vào hàng đợi thay vì ghi trực tiếp vào cơ sở dữ liệu
 	urlRecord := URL{ID: newID, URL: url}
@@ -221,11 +224,24 @@ func batchInsert(urls []URL) {
 }
 
 // makeID generates a random alphanumeric string of the specified length
-func makeID(length int) string {
-	var result string
-	const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	for i := 0; i < length; i++ {
-		result += string(characters[rand.Intn(len(characters))])
+func makeID() string {
+	return uuid.New().String()
+}
+
+func deleteAllURLsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	if err := deleteAllRecords(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Failed to delete records"))
+		return
 	}
-	return result
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("All records deleted successfully"))
+}
+
+func deleteAllRecords() error {
+	if err := DB.Unscoped().Where("1 = 1").Delete(&URL{}).Error; err != nil {
+		return err
+	}
+	println("All records deleted from URL table")
+	return nil
 }
