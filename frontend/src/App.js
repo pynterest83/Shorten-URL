@@ -155,11 +155,17 @@ function RedirectShort() {
         const response = await fetch(`http://localhost:8080/short/${id}`);
         if (response.ok) {
           const data = await response.json();
-          window.location.replace(data.originalUrl);
+          // Check if URL has protocol, add if missing
+          let url = data.originalUrl;
+          if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            url = 'http://' + url;
+          }
+          window.location.replace(url);
         } else {
           setError('URL not found');
         }
       } catch (err) {
+        console.error('Redirect error:', err);
         setError('Failed to fetch URL');
       } finally {
         setLoading(false);

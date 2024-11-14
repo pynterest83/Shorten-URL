@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Ports for each instance
-ports=(8081 8082 8083 8084 8085)
+ports=(8080 8081 8082 8083 8084)
 
 # Launch each instance in the background
 for port in "${ports[@]}"; do

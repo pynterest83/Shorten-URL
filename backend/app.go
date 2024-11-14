@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -148,7 +149,12 @@ func GetLink(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
 		returnValue := make(chan []byte)
 		MergeRequest(id, returnValue)
 		result := <-returnValue
-		_, _ = w.Write(result)
+
+		// Return JSON response
+		response := map[string]string{
+			"originalUrl": string(result),
+		}
+		json.NewEncoder(w).Encode(response)
 	}()
 	waiter.Wait()
 }
