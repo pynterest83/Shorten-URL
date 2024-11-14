@@ -50,13 +50,31 @@ function URLShortener() {
     }
   };
 
-  const clearHistory = () => {
+  const clearHistory = async () => {
     if (window.confirm('Are you sure you want to clear all URLs?')) {
-      setShortenedURLList([]);
-      localStorage.removeItem('shortenedURLList');
+      const ids = shortenedURLList.map((url) => url.shortId);
+      try {
+        const response = await fetch('http://localhost:8080/delete-urls', {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(ids),
+        });
+        
+        if (response.ok) {
+          setShortenedURLList([]);
+          localStorage.removeItem('shortenedURLList');
+        } else {
+          alert("Failed to delete URLs. Please try again.");
+        }
+      } catch (error) {
+        console.error("Error deleting URLs:", error);
+        alert("An error occurred. Please try again.");
+      }
     }
   };
-
+  
   const handleShare = (shortId) => {
     if (navigator.share) {
       navigator.share({
@@ -74,9 +92,31 @@ function URLShortener() {
     alert(`Copied: http://localhost:3000/short/${shortId}`);
   };
 
-  const handleDelete = (index) => {
-    const updatedList = shortenedURLList.filter((_, i) => i !== index);
-    setShortenedURLList(updatedList);
+  const handleDelete = async (index) => {
+    const urlToDelete = shortenedURLList[index];
+    try {
+      const response = await fetch(`http://localhost:8080/delete-urls`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([urlToDelete.shortId]),
+      });
+
+      if (response.ok) {
+        const updatedList = shortenedURLList.filter((_, i) => i !== index);
+        setShortenedURLList(updatedList);
+
+        if (updatedList.length === 0) {
+          localStorage.removeItem('shortenedURLList'); // Clear storage if list is empty
+        }
+      } else {
+        alert("Failed to delete URL. Please try again.");
+      }
+    } catch (error) {
+      console.error("Error deleting URL:", error);
+      alert("An error occurred. Please try again.");
+    }
   };
 
   const handleEdit = (index) => {
