@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -13,7 +11,13 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/gorilla/mux"
+	"math/rand"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/alphadose/haxmap"
+	"github.com/julienschmidt/httprouter"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
 	"gorm.io/driver/postgres"
@@ -23,6 +27,7 @@ import (
 var RedisClient *redis.Client
 var DB *gorm.DB
 var ctx = context.Background()
+var WorkerTasks = haxmap.New[string, *WorkerTask]()
 
 // URL model for GORM
 type URL struct {
@@ -52,23 +57,18 @@ func main() {
 		panic(err)
 	}
 
-	// Khởi tạo worker để xử lý queue
 	go processQueue()
 
-	// Set up the router with CORS
-	router := mux.NewRouter()
-	router.HandleFunc("/short/{id}", GetLink)
-	router.HandleFunc("/create", ShortenURL)
+	router := httprouter.New()
+	router.GET("/short/:id", GetLink)
+	router.POST("/create", ShortenURL)
 
-	// Configure CORS
 	corsHandler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:80"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowCredentials: true,
 		AllowedHeaders:   []string{"Content-Type"},
 	})
-
-	// Wrap router with CORS middleware
 	handler := corsHandler.Handler(router)
 
 	// Create server with configured port
@@ -101,34 +101,64 @@ func main() {
 	}
 }
 
-// GetLink handles the request to fetch the original URL based on the shortened ID
-func GetLink(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	id := mux.Vars(r)["id"]
+type WorkerTask struct {
+	waiters []chan<- []byte
+	mutex   sync.Mutex
+}
 
+func MergeRequest(id string, channel chan<- []byte) {
+	task, exist := WorkerTasks.GetOrSet(id, &WorkerTask{
+		waiters: make([]chan<- []byte, 0),
+	})
+	task.mutex.Lock()
+	task.waiters = append(task.waiters, channel)
+	task.mutex.Unlock()
+	if !exist {
+		go TaskStart(id, task)
+	}
+
+}
+
+func TaskStart(id string, task *WorkerTask) {
+	var result []byte
 	data, err := RedisClient.Get(ctx, id).Result()
-	if errors.Is(err, redis.Nil) {
+	if err != nil {
 		var url URL
 		if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
-			w.WriteHeader(404)
-			return
+			result = nil
+		} else {
+			result = []byte(url.URL)
+			_ = RedisClient.Set(ctx, id, url.URL, 0).Err()
 		}
-
-		_ = RedisClient.Set(ctx, id, url.URL, 0).Err()
-
-		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
-	} else if err != nil {
-		w.WriteHeader(500)
-		return
 	} else {
-		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
+		result = []byte(data)
+	}
+	time.Sleep(10 * time.Millisecond)
+	WorkerTasks.Del(id)
+	for _, waiter := range task.waiters {
+		waiter <- result
 	}
 }
 
-// ShortenURL handles the request to shorten a given URL
-func ShortenURL(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
+// GetLink handles the request to fetch the original URL based on the shortened ID
+func GetLink(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
+	w.Header().Set("Content-Type", "application/json")
+	id := ps.ByName("id")
+	var waiter sync.WaitGroup
+	waiter.Add(1)
+	go func() {
+		defer waiter.Done()
+		returnValue := make(chan []byte)
+		MergeRequest(id, returnValue)
+		result := <-returnValue
+		_, _ = w.Write(result)
+	}()
+	waiter.Wait()
+}
 
+// ShortenURL handles the request to shorten a given URL
+func ShortenURL(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	w.Header().Set("Content-Type", "text/plain")
 	url := r.FormValue("url")
 	if url == "" {
 		w.WriteHeader(400) // Bad Request if no URL is provided
