@@ -88,7 +88,7 @@ func startWorkers(numWorkers int) {
 	for i := 0; i < numWorkers; i++ {
 		go func(workerID int) {
 			batchSize := 200
-			ticker := time.NewTicker(1 * time.Second)
+			ticker := time.NewTicker(5 * time.Millisecond)
 			defer ticker.Stop()
 
 			var urls []URL
