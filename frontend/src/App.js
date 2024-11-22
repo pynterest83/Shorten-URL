@@ -1,34 +1,46 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, useParams } from 'react-router-dom';
 import './App.css';
+import { Trash2, Copy, Share } from 'lucide-react';
 
 function URLShortener() {
   const [url, setUrl] = useState('');
-  const [alias, setAlias] = useState('');
   const [shortenedURLList, setShortenedURLList] = useState([]);
+
+  useEffect(() => {
+    const storedURLs = JSON.parse(localStorage.getItem('shortenedURLList'));
+    if (storedURLs && Array.isArray(storedURLs)) {
+      setShortenedURLList(storedURLs);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (shortenedURLList.length > 0) {
+      localStorage.setItem('shortenedURLList', JSON.stringify(shortenedURLList));
+    }
+  }, [shortenedURLList]);
 
   const handleShorten = async () => {
     if (!url) {
       alert("Please enter a URL to shorten.");
       return;
     }
-  
-    const requestUrl = `http://localhost:8080/create?url=${encodeURIComponent(url)}`; // Construct the URL
-    console.log(requestUrl);
+
+    const requestUrl = `http://localhost:8080/create?url=${encodeURIComponent(url)}`;
     try {
       const response = await fetch(requestUrl, {
-        method: 'POST', // Use POST method
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
       });
-  
+
       if (response.ok) {
-        const newID = await response.text(); // Assuming the backend returns the new ID as plain text
-        const shortened = `http://localhost:3000/short/${newID}`; // Use the newID received
-        setShortenedURLList([...shortenedURLList, { fullUrl: url, shortUrl: shortened, shortId: newID}]); // Store newID directly
+        const newID = await response.text();
+        const shortened = `http://localhost:3000/short/${newID}`;
+        const newShortenedURL = { fullUrl: url, shortUrl: shortened, shortId: newID };
+        setShortenedURLList([...shortenedURLList, newShortenedURL]);
         setUrl('');
-        setAlias('');
       } else {
         alert("Failed to shorten the URL. Please try again.");
       }
@@ -38,18 +50,37 @@ function URLShortener() {
     }
   };
 
-  const clearHistory = () => {
+  const clearHistory = async () => {
     if (window.confirm('Are you sure you want to clear all URLs?')) {
-      setShortenedURLList([]);
+      const ids = shortenedURLList.map((url) => url.shortId);
+      try {
+        const response = await fetch('http://localhost:8080/delete-urls', {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(ids),
+        });
+        
+        if (response.ok) {
+          setShortenedURLList([]);
+          localStorage.removeItem('shortenedURLList');
+        } else {
+          alert("Failed to delete URLs. Please try again.");
+        }
+      } catch (error) {
+        console.error("Error deleting URLs:", error);
+        alert("An error occurred. Please try again.");
+      }
     }
   };
-
+  
   const handleShare = (shortId) => {
     if (navigator.share) {
       navigator.share({
         title: 'Shortened URL',
         text: 'Check out this URL!',
-        url: `http://localhost:3000/short/${shortId}`, // Change to backend link
+        url: `http://localhost:3000/short/${shortId}`,
       });
     } else {
       alert('Share not supported on this browser.');
@@ -60,83 +91,125 @@ function URLShortener() {
     navigator.clipboard.writeText(`http://localhost:3000/short/${shortId}`);
     alert(`Copied: http://localhost:3000/short/${shortId}`);
   };
-  
-  const handleDelete = (index) => {
-    const updatedList = shortenedURLList.filter((_, i) => i !== index);
-    setShortenedURLList(updatedList);
-  };
-  
-  const handleEdit = (index) => {
-    const editedUrl = prompt("Enter new URL:", shortenedURLList[index].fullUrl);
-    if (editedUrl) {
-      const updatedList = [...shortenedURLList];
-      updatedList[index].fullUrl = editedUrl;
-      setShortenedURLList(updatedList);
+
+  const handleDelete = async (index) => {
+    const urlToDelete = shortenedURLList[index];
+    try {
+      const response = await fetch(`http://localhost:8080/delete-urls`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([urlToDelete.shortId]),
+      });
+
+      if (response.ok) {
+        const updatedList = shortenedURLList.filter((_, i) => i !== index);
+        setShortenedURLList(updatedList);
+
+        if (updatedList.length === 0) {
+          localStorage.removeItem('shortenedURLList'); // Clear storage if list is empty
+        }
+      } else {
+        alert("Failed to delete URL. Please try again.");
+      }
+    } catch (error) {
+      console.error("Error deleting URL:", error);
+      alert("An error occurred. Please try again.");
     }
   };
-  
+
   return (
-    <div className="app">
-      <div className="url-shortener">
-        <h2>URLShrinker</h2>
-        <div className="input-container">
+    <div className="min-h-screen bg-gray-100 p-4 md:p-8">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-2xl font-bold text-center mb-6">URLShrinker</h2>
+        <div className="space-y-4">
           <input
             type="text"
             placeholder="Enter original link here"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
+            className="w-full p-2 border border-gray-300 rounded"
           />
-          <div className="custom-link">
-            <select>
-              <option value="localhost:3000">localhost:3000</option>
-            </select>
-            <input
-              type="text"
-              placeholder="Enter alias"
-              value={alias}
-              onChange={(e) => setAlias(e.target.value)}
-            />
-          </div>
-          <button onClick={handleShorten}>Shorten URL</button>
+          <button
+            onClick={handleShorten}
+            className="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600 transition-colors"
+          >
+            Shorten URL
+          </button>
         </div>
 
         {shortenedURLList.length > 0 && (
-          <div className="shortened-list">
-            <h3>Your Shortened URLs:</h3>
-            <div className="table-container">
-              <table>
+          <div className="mt-8">
+            <h3 className="text-xl font-semibold mb-4">Your Shortened URLs:</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full border">
                 <thead>
-                  <tr>
-                    <th>Full URL</th>
-                    <th style={{ width: '200px' }}>Short URL</th>
-                    <th style={{ width: '150px' }}>Actions</th>
+                  <tr className="bg-black-200">
+                    <th className="p-2 text-left">Full URL</th>
+                    <th className="p-2 text-left">Short URL</th>
+                    <th className="p-2 text-left">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {shortenedURLList.map((shortened, index) => (
-                    <tr key={index}>
-                      <td>
-                        <a href={shortened.fullUrl} target="_blank" rel="noopener noreferrer">
+                    <tr key={index} className="border-b">
+                      <td className="p-2">
+                        <a
+                          href={shortened.fullUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:underline"
+                        >
                           {shortened.fullUrl}
                         </a>
                       </td>
-                      <td>
-                        <a href={`http://localhost:3000/short/${shortened.shortId}`} target="_blank" rel="noopener noreferrer">
+                      <td className="p-2">
+                        <a
+                          href={`http://localhost:3000/short/${shortened.shortId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:underline"
+                        >
                           {shortened.shortUrl}
                         </a>
                       </td>
-                      <td style={{ display: 'flex', gap: '10px' }}>
-                        <button className="action-button" onClick={() => handleEdit(index)}>Edit</button>
-                        <button className="action-button" onClick={() => handleDelete(index)}>Delete</button>
-                        <button className="action-button" onClick={() => handleCopy(shortened.shortId)}>Copy</button>
-                        <button className="action-button" onClick={() => handleShare(shortened.shortId)}>Share</button>
+                      <td className="p-2">
+                        <div className="flex space-x-2">
+                          <button
+                            onClick={() => handleDelete(index)}
+                            className="p-1 bg-red-500 text-white rounded hover:bg-red-600"
+                            aria-label="Delete"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                          <button
+                            onClick={() => handleCopy(shortened.shortId)}
+                            className="p-1 bg-gray-500 text-white rounded hover:bg-gray-600"
+                            aria-label="Copy"
+                          >
+                            <Copy size={16} />
+                          </button>
+                          <button
+                            onClick={() => handleShare(shortened.shortId)}
+                            className="p-1 bg-green-500 text-white rounded hover:bg-green-600"
+                            aria-label="Share"
+                          >
+                            <Share size={16} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <button className="clear-history" onClick={clearHistory}>Clear History</button>
+            <button
+              onClick={clearHistory}
+              className="mt-4 w-full bg-red-500 text-white p-2 rounded hover:bg-red-600 transition-colors"
+            >
+              Clear History
+            </button>
           </div>
         )}
       </div>
@@ -155,11 +228,16 @@ function RedirectShort() {
         const response = await fetch(`http://localhost:8080/short/${id}`);
         if (response.ok) {
           const data = await response.json();
-          window.location.replace(data.originalUrl);
+          let url = data.originalUrl;
+          if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            url = 'http://' + url;
+          }
+          window.location.replace(url);
         } else {
           setError('URL not found');
         }
       } catch (err) {
+        console.error('Redirect error:', err);
         setError('Failed to fetch URL');
       } finally {
         setLoading(false);
