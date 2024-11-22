@@ -19,56 +19,56 @@ import (
 	"gorm.io/gorm"
 )
 
-var RedisClient *redis.Client
-var DB *gorm.DB
-var ctx = context.Background()
+var RedisClient *redis.Client  // Global Redis client instance
+var DB *gorm.DB                // Global GORM database instance
+var ctx = context.Background() // Context for Redis operations
 
-// URL model for GORM
+// URL model for GORM, representing a shortened URL entry
 type URL struct {
-	ID         string      `gorm:"primary_key"`
-	URL        string      `gorm:"not null"`
-	ResultChan chan string `gorm:"-"`
+	ID         string      `gorm:"primary_key"` // Primary key for the URL
+	URL        string      `gorm:"not null"`    // The original URL
+	ResultChan chan string `gorm:"-"`           // A channel to send results, not persisted in the DB
 }
 
-var urlQueue = make(chan URL, 5000) // Channel hàng đợi với buffer 5000
+var urlQueue = make(chan URL, 5000) // Buffered channel to hold URL entries for batch processing
 
 func main() {
 	port := flag.String("port", "8080", "Port for the server to listen on")
 	flag.Parse()
 
-	// Khởi tạo Redis
+	// Initialize Redis client
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
 
 	if _, err := RedisClient.Ping(ctx).Result(); err != nil {
-		panic(err)
+		panic(err) // Exit if Redis is not available
 	}
 
-	// Khởi tạo kết nối với cơ sở dữ liệu và thiết lập pool
+	// Initialize PostgreSQL connection using GORM
 	var err error
 	dsn := "host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		PrepareStmt:            true,
-		SkipDefaultTransaction: true,
+		PrepareStmt:            true, // Use prepared statements for performance
+		SkipDefaultTransaction: true, // Disable default transactions for performance
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	// Khởi tạo các worker để xử lý hàng đợi
+	// Start workers to process the URL queue
 	startWorkers(3)
 
-	// Set up the router with CORS
+	// Set up HTTP router and define routes
 	router := mux.NewRouter()
-	router.HandleFunc("/short/{id}", GetLink).Methods("GET")
-	router.HandleFunc("/create", ShortenURL).Methods("POST")
-	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE")
+	router.HandleFunc("/short/{id}", GetLink).Methods("GET")                 // Retrieve original URL
+	router.HandleFunc("/create", ShortenURL).Methods("POST")                 // Create shortened URL
+	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE") // Delete all URLs
 
-	// Configure CORS
+	// Configure CORS for the server
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedOrigins:   []string{"http://localhost:3000"}, // Allow specific origin
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowCredentials: true,
 	})
@@ -76,19 +76,19 @@ func main() {
 	// Wrap router with CORS middleware
 	handler := corsHandler.Handler(router)
 
-	// Start server with CORS-enabled handler and specified port
+	// Start the server
 	fmt.Printf("Starting server on port %s...\n", *port)
 	if http.ListenAndServe(":"+*port, handler) != nil {
 		return
 	}
 }
 
-// startWorkers khởi tạo các worker goroutine để xử lý batch ghi
+// startWorkers initializes worker goroutines to handle batch database inserts
 func startWorkers(numWorkers int) {
 	for i := 0; i < numWorkers; i++ {
 		go func(workerID int) {
-			batchSize := 200
-			ticker := time.NewTicker(1 * time.Second)
+			batchSize := 200                          // Maximum number of URLs per batch
+			ticker := time.NewTicker(1 * time.Second) // Time-based batch processing
 			defer ticker.Stop()
 
 			var urls []URL
@@ -97,19 +97,20 @@ func startWorkers(numWorkers int) {
 			for {
 				select {
 				case url := <-urlQueue:
+					// Add URL to batch
 					mutex.Lock()
 					urls = append(urls, url)
 					mutex.Unlock()
 
-					// Nếu đạt đến kích thước batch, ghi tất cả vào DB
+					// Insert batch into DB if it reaches the batch size
 					if len(urls) >= batchSize {
 						mutex.Lock()
 						batchInsert(urls)
-						urls = nil // Reset slice sau khi ghi
+						urls = nil // Reset the slice after insertion
 						mutex.Unlock()
 					}
 				case <-ticker.C:
-					// Ghi bất cứ bản ghi nào còn lại vào cuối mỗi giây
+					// Insert any remaining URLs at the end of each second
 					mutex.Lock()
 					if len(urls) > 0 {
 						batchInsert(urls)
@@ -122,57 +123,53 @@ func startWorkers(numWorkers int) {
 	}
 }
 
-// ShortenURL handles the request to shorten a given URL
+// ShortenURL handles requests to create a shortened URL
 func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	url := r.FormValue("url")
+	url := r.FormValue("url") // Extract the original URL from the form
 	if url == "" {
 		http.Error(w, "Invalid URL", http.StatusBadRequest)
 		return
 	}
 
-	// Tạo channel để chờ kết quả
+	// Create a channel to receive the result
 	resultChan := make(chan string)
 
-	// Đưa URL vào hàng đợi
+	// Add the URL to the processing queue
 	urlQueue <- URL{URL: url, ResultChan: resultChan}
 
-	// Chờ kết quả từ worker
+	// Wait for the worker to generate the shortened ID
 	newID := <-resultChan
 
-	// Trả về ID
+	// Send the response with the generated ID
 	response := map[string]string{"id": newID}
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-// batchInsert thực hiện batch insert vào cơ sở dữ liệu
+// batchInsert performs batch inserts into the database
 func batchInsert(urls []URL) {
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Tạo ID mới cho các URL trong mỗi lần retry
+		// Generate new IDs for the URLs during each retry
 		for i := range urls {
-			urls[i].ID = makeID() // Tạo lại ID mỗi lần thử lại
+			urls[i].ID = makeID()
 		}
 
-		// Bắt đầu transaction
+		// Start a transaction
 		tx := DB.Begin()
 
-		// Thực hiện batch insert
+		// Perform batch insert
 		if err := tx.Create(&urls).Error; err != nil {
-			tx.Rollback() // Rollback nếu xảy ra lỗi
-
-			// Kiểm tra lỗi duplicate key
+			tx.Rollback() // Rollback transaction on error
 			fmt.Printf("Batch insert failed on attempt %d: %v\n", attempt, err)
-
-			// Nếu là lỗi duplicate key, thử lại với ID mới
-			continue
+			continue // Retry on error
 		} else {
-			// Commit transaction nếu thành công
+			// Commit transaction if successful
 			if err := tx.Commit().Error; err != nil {
 				fmt.Printf("Transaction commit failed on attempt %d: %v\n", attempt, err)
 			} else {
-				// Gửi kết quả cho từng URL
+				// Notify each URL's result channel
 				for _, url := range urls {
 					if url.ResultChan != nil {
 						url.ResultChan <- url.ID
@@ -183,7 +180,7 @@ func batchInsert(urls []URL) {
 		}
 	}
 
-	// Nếu sau maxRetries vẫn thất bại, trả về lỗi
+	// Handle failed retries
 	for _, url := range urls {
 		if url.ResultChan != nil {
 			url.ResultChan <- "error"
@@ -193,7 +190,7 @@ func batchInsert(urls []URL) {
 
 var charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-// makeID generates a random alphanumeric string of the specified length
+// makeID generates a random alphanumeric string of length 6
 func makeID() string {
 	id := make([]byte, 6)
 	for i := range id {
@@ -203,34 +200,51 @@ func makeID() string {
 	return string(id)
 }
 
-// GetLink handles the request to fetch the original URL based on the shortened ID
+// GetLink handles requests to fetch the original URL using the shortened ID
 func GetLink(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
 
-	// Kiểm tra trong Redis cache
-	data, err := RedisClient.Get(ctx, id).Result()
-	if errors.Is(err, redis.Nil) {
-		// Nếu không tìm thấy trong cache, tìm trong cơ sở dữ liệu
-		var url URL
-		if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
+	// Lua script to atomically retrieve the URL from Redis
+	script := redis.NewScript(`
+		local url = redis.call("GET", KEYS[1])
+		if url then
+			return url
+		end
+		return nil
+	`)
 
-		// Lưu vào cache Redis với TTL (thời gian sống) là 5 phút
-		_ = RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err()
-
-		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
-	} else if err != nil {
+	data, err := script.Run(ctx, RedisClient, []string{id}).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, `{"error": "Redis script execution failed: %v"}`, err)
 		return
-	} else {
-		// Nếu tìm thấy trong cache, trả về dữ liệu từ Redis
-		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
 	}
+
+	if data != nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data.(string)})
+		return
+	}
+
+	// Fallback to database lookup if URL is not in Redis
+	var url URL
+	if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprintf(w, `{"error": "URL not found for ID: %s"}`, id)
+		return
+	}
+
+	// Cache the URL in Redis
+	if err := RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, `{"error": "Failed to cache URL in Redis: %v"}`, err)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
 }
 
+// deleteAllURLsHandler handles requests to delete all URL records
 func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
 	if err := deleteAllRecords(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -241,10 +255,11 @@ func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("All records deleted successfully"))
 }
 
+// deleteAllRecords deletes all URL records from the database
 func deleteAllRecords() error {
 	if err := DB.Unscoped().Where("1 = 1").Delete(&URL{}).Error; err != nil {
 		return err
 	}
-	println("All records deleted from URL table")
+	fmt.Println("All records deleted from URL table")
 	return nil
 }
