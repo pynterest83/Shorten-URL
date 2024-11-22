@@ -54,16 +54,8 @@ func main() {
 		panic(err)
 	}
 
-	// Thiết lập pool cho kết nối database
-	//sqlDB, _ := DB.DB()
-	//sqlDB.SetMaxOpenConns(20)                 // Số kết nối tối đa có thể mở cùng lúc
-	//sqlDB.SetMaxIdleConns(10)                 // Số kết nối nhàn rỗi tối đa
-	//sqlDB.SetConnMaxLifetime(2 * time.Minute) // Thời gian sống tối đa cho một kết nối
-
 	// Khởi tạo các worker để xử lý hàng đợi
-	for i := 0; i < 3; i++ {
-		go processQueue()
-	}
+	startWorkers(3)
 
 	// Set up the router with CORS
 	router := mux.NewRouter()
@@ -85,6 +77,38 @@ func main() {
 	fmt.Printf("Starting server on port %s...\n", *port)
 	if http.ListenAndServe(":"+*port, handler) != nil {
 		return
+	}
+}
+
+// startWorkers khởi tạo các worker goroutine để xử lý batch ghi
+func startWorkers(numWorkers int) {
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			batchSize := 200
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+
+			var urls []URL
+
+			for {
+				select {
+				case url := <-urlQueue:
+					urls = append(urls, url)
+
+					// Nếu đạt đến kích thước batch, ghi tất cả vào DB
+					if len(urls) >= batchSize {
+						batchInsert(urls)
+						urls = urls[:0] // Reset lại slice sau khi ghi
+					}
+				case <-ticker.C:
+					// Ghi bất cứ bản ghi nào còn lại vào cuối mỗi giây
+					if len(urls) > 0 {
+						batchInsert(urls)
+						urls = urls[:0]
+					}
+				}
+			}
+		}(i)
 	}
 }
 
@@ -137,44 +161,11 @@ func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(newID))
 }
 
-// processQueue xử lý các yêu cầu từ hàng đợi và ghi vào cơ sở dữ liệu
-func processQueue() {
-	batchSize := 200
-	ticker := time.NewTicker(1000 * time.Millisecond)
-	defer ticker.Stop()
-
-	var urls []URL
-
-	for {
-		select {
-		case url := <-urlQueue:
-			urls = append(urls, url)
-
-			// Nếu đạt đến kích thước batch, ghi tất cả vào DB
-			if len(urls) >= batchSize {
-				batchInsert(urls)
-				urls = urls[:0] // Reset lại slice sau khi ghi
-			}
-		case <-ticker.C:
-			// Ghi bất cứ bản ghi nào còn lại vào cuối mỗi giây
-			if len(urls) > 0 {
-				batchInsert(urls)
-				urls = urls[:0]
-			}
-		}
-	}
-}
-
-var totalInserts int
-
 // batchInsert thực hiện batch insert vào cơ sở dữ liệu
 func batchInsert(urls []URL) {
 	if err := DB.Create(&urls).Error; err != nil {
 		// Log lỗi nếu batch insert thất bại
 		println("Batch insert failed:", err.Error())
-	} else {
-		totalInserts += len(urls)
-		//println("Total URLs inserted:", totalInserts)
 	}
 }
 
