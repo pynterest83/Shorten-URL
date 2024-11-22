@@ -2,14 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
@@ -23,8 +25,9 @@ var ctx = context.Background()
 
 // URL model for GORM
 type URL struct {
-	ID  string `gorm:"primary_key"`
-	URL string `gorm:"not null"`
+	ID         string      `gorm:"primary_key"`
+	URL        string      `gorm:"not null"`
+	ResultChan chan string `gorm:"-"`
 }
 
 var urlQueue = make(chan URL, 5000) // Channel hàng đợi với buffer 5000
@@ -89,27 +92,115 @@ func startWorkers(numWorkers int) {
 			defer ticker.Stop()
 
 			var urls []URL
+			var mutex sync.Mutex
 
 			for {
 				select {
 				case url := <-urlQueue:
+					mutex.Lock()
 					urls = append(urls, url)
+					mutex.Unlock()
 
 					// Nếu đạt đến kích thước batch, ghi tất cả vào DB
 					if len(urls) >= batchSize {
+						mutex.Lock()
 						batchInsert(urls)
-						urls = urls[:0] // Reset lại slice sau khi ghi
+						urls = nil // Reset slice sau khi ghi
+						mutex.Unlock()
 					}
 				case <-ticker.C:
 					// Ghi bất cứ bản ghi nào còn lại vào cuối mỗi giây
+					mutex.Lock()
 					if len(urls) > 0 {
 						batchInsert(urls)
-						urls = urls[:0]
+						urls = nil
 					}
+					mutex.Unlock()
 				}
 			}
 		}(i)
 	}
+}
+
+// ShortenURL handles the request to shorten a given URL
+func ShortenURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	url := r.FormValue("url")
+	if url == "" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+
+	// Tạo channel để chờ kết quả
+	resultChan := make(chan string)
+
+	// Đưa URL vào hàng đợi
+	urlQueue <- URL{URL: url, ResultChan: resultChan}
+
+	// Chờ kết quả từ worker
+	newID := <-resultChan
+
+	// Trả về ID
+	response := map[string]string{"id": newID}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// batchInsert thực hiện batch insert vào cơ sở dữ liệu
+func batchInsert(urls []URL) {
+	const maxRetries = 5
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Tạo ID mới cho các URL trong mỗi lần retry
+		for i := range urls {
+			urls[i].ID = makeID() // Tạo lại ID mỗi lần thử lại
+		}
+
+		// Bắt đầu transaction
+		tx := DB.Begin()
+
+		// Thực hiện batch insert
+		if err := tx.Create(&urls).Error; err != nil {
+			tx.Rollback() // Rollback nếu xảy ra lỗi
+
+			// Kiểm tra lỗi duplicate key
+			fmt.Printf("Batch insert failed on attempt %d: %v\n", attempt, err)
+
+			// Nếu là lỗi duplicate key, thử lại với ID mới
+			continue
+		} else {
+			// Commit transaction nếu thành công
+			if err := tx.Commit().Error; err != nil {
+				fmt.Printf("Transaction commit failed on attempt %d: %v\n", attempt, err)
+			} else {
+				// Gửi kết quả cho từng URL
+				for _, url := range urls {
+					if url.ResultChan != nil {
+						url.ResultChan <- url.ID
+					}
+				}
+				return
+			}
+		}
+	}
+
+	// Nếu sau maxRetries vẫn thất bại, trả về lỗi
+	for _, url := range urls {
+		if url.ResultChan != nil {
+			url.ResultChan <- "error"
+		}
+	}
+}
+
+var charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// makeID generates a random alphanumeric string of the specified length
+func makeID() string {
+	id := make([]byte, 6)
+	for i := range id {
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		id[i] = charset[num.Int64()]
+	}
+	return string(id)
 }
 
 // GetLink handles the request to fetch the original URL based on the shortened ID
@@ -138,40 +229,6 @@ func GetLink(w http.ResponseWriter, r *http.Request) {
 		// Nếu tìm thấy trong cache, trả về dữ liệu từ Redis
 		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
 	}
-}
-
-// ShortenURL handles the request to shorten a given URL
-func ShortenURL(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-
-	url := r.FormValue("url")
-	if url == "" {
-		w.WriteHeader(400) // Bad Request if no URL is provided
-		return
-	}
-
-	// Generate a new unique ID for the shortened URL
-	newID := makeID()
-
-	// Đưa bản ghi vào hàng đợi thay vì ghi trực tiếp vào cơ sở dữ liệu
-	urlRecord := URL{ID: newID, URL: url}
-	urlQueue <- urlRecord // Đưa vào hàng đợi
-
-	// Trả về ID của URL rút gọn ngay lập tức
-	_, _ = w.Write([]byte(newID))
-}
-
-// batchInsert thực hiện batch insert vào cơ sở dữ liệu
-func batchInsert(urls []URL) {
-	if err := DB.Create(&urls).Error; err != nil {
-		// Log lỗi nếu batch insert thất bại
-		println("Batch insert failed:", err.Error())
-	}
-}
-
-// makeID generates a random alphanumeric string of the specified length
-func makeID() string {
-	return uuid.New().String()
 }
 
 func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
