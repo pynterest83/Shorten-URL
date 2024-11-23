@@ -19,71 +19,84 @@ import (
 	"gorm.io/gorm"
 )
 
-var RedisClient *redis.Client  // Global Redis client instance
-var DB *gorm.DB                // Global GORM database instance
-var ctx = context.Background() // Context for Redis operations
+var (
+	RedisClient *redis.Client
+	DB          *gorm.DB
+	ctx         = context.Background()
+	urlQueue    = make(chan URL, 5000) // Queue for batch processing
+)
 
-// URL model for GORM, representing a shortened URL entry
 type URL struct {
-	ID         string      `gorm:"primary_key"` // Primary key for the URL
-	URL        string      `gorm:"not null"`    // The original URL
-	ResultChan chan string `gorm:"-"`           // A channel to send results, not persisted in the DB
+	ID         string      `gorm:"primary_key"`
+	URL        string      `gorm:"not null"`
+	ResultChan chan string `gorm:"-"` // Used for communicating results
 }
 
-var urlQueue = make(chan URL, 5000) // Buffered channel to hold URL entries for batch processing
-
 func main() {
+	// Parse command-line flags
 	port := flag.String("port", "8080", "Port for the server to listen on")
 	flag.Parse()
 
 	// Initialize Redis client
+	initRedis()
+
+	// Initialize PostgreSQL connection
+	initDB()
+
+	// Start workers for batch processing
+	startWorkers(3)
+
+	// Set up HTTP router
+	router := mux.NewRouter()
+	router.HandleFunc("/short/{id}", GetLink).Methods("GET")
+	router.HandleFunc("/create", ShortenURL).Methods("POST")
+	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE")
+
+	// Set up CORS
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowCredentials: true,
+	})
+	handler := corsHandler.Handler(router)
+
+	// Start the HTTP server
+	fmt.Printf("Starting server on port %s...\n", *port)
+	err := http.ListenAndServe(":"+*port, handler)
+	if err != nil {
+		return
+	}
+}
+
+func initRedis() {
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
 
 	if _, err := RedisClient.Ping(ctx).Result(); err != nil {
-		panic(err) // Exit if Redis is not available
-	}
-
-	// Initialize PostgreSQL connection using GORM
-	var err error
-	dsn := "host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"
-	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		PrepareStmt:            true, // Use prepared statements for performance
-		SkipDefaultTransaction: true, // Disable default transactions for performance
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	// Start workers to process the URL queue
-	startWorkers(3)
-
-	// Set up HTTP router and define routes
-	router := mux.NewRouter()
-	router.HandleFunc("/short/{id}", GetLink).Methods("GET")                 // Retrieve original URL
-	router.HandleFunc("/create", ShortenURL).Methods("POST")                 // Create shortened URL
-	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE") // Delete all URLs
-
-	// Configure CORS for the server
-	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"}, // Allow specific origin
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowCredentials: true,
-	})
-
-	// Wrap router with CORS middleware
-	handler := corsHandler.Handler(router)
-
-	// Start the server
-	fmt.Printf("Starting server on port %s...\n", *port)
-	if http.ListenAndServe(":"+*port, handler) != nil {
-		return
+		panic(fmt.Sprintf("Failed to connect to Redis: %v", err))
 	}
 }
 
-// startWorkers initializes worker goroutines to handle batch database inserts
+func initDB() {
+	var err error
+	dsn := "host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"
+	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		PrepareStmt:            true,
+		SkipDefaultTransaction: true,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("Failed to connect to PostgreSQL: %v", err))
+	}
+
+	// Configure connection pool
+	sqlDB, _ := DB.DB()
+	sqlDB.SetMaxOpenConns(50)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+}
+
 func startWorkers(numWorkers int) {
 	for i := 0; i < numWorkers; i++ {
 		go func(workerID int) {
@@ -97,20 +110,15 @@ func startWorkers(numWorkers int) {
 			for {
 				select {
 				case url := <-urlQueue:
-					// Add URL to batch
 					mutex.Lock()
 					urls = append(urls, url)
+					if len(urls) >= batchSize {
+						batchInsert(urls)
+						urls = nil
+					}
 					mutex.Unlock()
 
-					// Insert batch into DB if it reaches the batch size
-					if len(urls) >= batchSize {
-						mutex.Lock()
-						batchInsert(urls)
-						urls = nil // Reset the slice after insertion
-						mutex.Unlock()
-					}
 				case <-ticker.C:
-					// Insert any remaining URLs at the end of each second
 					mutex.Lock()
 					if len(urls) > 0 {
 						batchInsert(urls)
@@ -123,64 +131,49 @@ func startWorkers(numWorkers int) {
 	}
 }
 
-// ShortenURL handles requests to create a shortened URL
 func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	url := r.FormValue("url") // Extract the original URL from the form
+	url := r.FormValue("url")
 	if url == "" {
 		http.Error(w, "Invalid URL", http.StatusBadRequest)
 		return
 	}
 
-	// Create a channel to receive the result
 	resultChan := make(chan string)
-
-	// Add the URL to the processing queue
 	urlQueue <- URL{URL: url, ResultChan: resultChan}
-
-	// Wait for the worker to generate the shortened ID
 	newID := <-resultChan
 
-	// Send the response with the generated ID
 	response := map[string]string{"id": newID}
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-// batchInsert performs batch inserts into the database
 func batchInsert(urls []URL) {
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Generate new IDs for the URLs during each retry
 		for i := range urls {
 			urls[i].ID = makeID()
 		}
 
-		// Start a transaction
 		tx := DB.Begin()
-
-		// Perform batch insert
 		if err := tx.Create(&urls).Error; err != nil {
-			tx.Rollback() // Rollback transaction on error
+			tx.Rollback()
 			fmt.Printf("Batch insert failed on attempt %d: %v\n", attempt, err)
-			continue // Retry on error
+			continue
+		}
+
+		if err := tx.Commit().Error; err != nil {
+			fmt.Printf("Failed to commit transaction: %v\n", err)
 		} else {
-			// Commit transaction if successful
-			if err := tx.Commit().Error; err != nil {
-				fmt.Printf("Transaction commit failed on attempt %d: %v\n", attempt, err)
-			} else {
-				// Notify each URL's result channel
-				for _, url := range urls {
-					if url.ResultChan != nil {
-						url.ResultChan <- url.ID
-					}
+			for _, url := range urls {
+				if url.ResultChan != nil {
+					url.ResultChan <- url.ID
 				}
-				return
 			}
+			return
 		}
 	}
 
-	// Handle failed retries
 	for _, url := range urls {
 		if url.ResultChan != nil {
 			url.ResultChan <- "error"
@@ -188,78 +181,53 @@ func batchInsert(urls []URL) {
 	}
 }
 
-var charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-// makeID generates a random alphanumeric string of length 6
-func makeID() string {
-	id := make([]byte, 6)
-	for i := range id {
-		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
-		id[i] = charset[num.Int64()]
-	}
-	return string(id)
-}
-
-// GetLink handles requests to fetch the original URL using the shortened ID
 func GetLink(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
 
-	// Lua script to atomically retrieve the URL from Redis
-	script := redis.NewScript(`
-		local url = redis.call("GET", KEYS[1])
-		if url then
-			return url
-		end
-		return nil
-	`)
-
-	data, err := script.Run(ctx, RedisClient, []string{id}).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = fmt.Fprintf(w, `{"error": "Redis script execution failed: %v"}`, err)
+	data, err := RedisClient.Get(ctx, id).Result()
+	if err == nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
 		return
 	}
 
-	if data != nil {
-		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data.(string)})
+	if !errors.Is(err, redis.Nil) {
+		http.Error(w, "Redis error", http.StatusInternalServerError)
 		return
 	}
 
-	// Fallback to database lookup if URL is not in Redis
 	var url URL
 	if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = fmt.Fprintf(w, `{"error": "URL not found for ID: %s"}`, id)
+		http.Error(w, "URL not found", http.StatusNotFound)
 		return
 	}
 
-	// Cache the URL in Redis
 	if err := RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err(); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = fmt.Fprintf(w, `{"error": "Failed to cache URL in Redis: %v"}`, err)
+		http.Error(w, "Failed to cache URL", http.StatusInternalServerError)
 		return
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
 }
 
-// deleteAllURLsHandler handles requests to delete all URL records
 func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
-	if err := deleteAllRecords(); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("Failed to delete records"))
+	if err := DB.Unscoped().Where("1 = 1").Delete(&URL{}).Error; err != nil {
+		http.Error(w, "Failed to delete records", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("All records deleted successfully"))
+	_, err := w.Write([]byte("All records deleted successfully"))
+	if err != nil {
+		return
+	}
 }
 
-// deleteAllRecords deletes all URL records from the database
-func deleteAllRecords() error {
-	if err := DB.Unscoped().Where("1 = 1").Delete(&URL{}).Error; err != nil {
-		return err
+func makeID() string {
+	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	id := make([]byte, 6)
+	for i := range id {
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		id[i] = charset[num.Int64()]
 	}
-	fmt.Println("All records deleted from URL table")
-	return nil
+	return string(id)
 }
