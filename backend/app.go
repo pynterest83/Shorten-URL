@@ -60,7 +60,6 @@ func main() {
 	})
 	handler := corsHandler.Handler(router)
 
-	// Start the HTTP server
 	fmt.Printf("Starting server on port %s...\n", *port)
 	err := http.ListenAndServe(":"+*port, handler)
 	if err != nil {
