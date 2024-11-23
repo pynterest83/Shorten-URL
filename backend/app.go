@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"math/big"
@@ -23,13 +22,19 @@ var (
 	RedisClient *redis.Client
 	DB          *gorm.DB
 	ctx         = context.Background()
-	urlQueue    = make(chan URL, 5000) // Queue for batch processing
+	writeQueue  = make(chan URL, 5000)         // Queue for batch processing
+	readQueue   = make(chan ReadRequest, 5000) // Queue for read requests
 )
 
 type URL struct {
 	ID         string      `gorm:"primary_key"`
 	URL        string      `gorm:"not null"`
 	ResultChan chan string `gorm:"-"` // Used for communicating results
+}
+
+type ReadRequest struct {
+	ID         string
+	ResultChan chan map[string]string
 }
 
 func main() {
@@ -43,8 +48,9 @@ func main() {
 	// Initialize PostgreSQL connection
 	initDB()
 
-	// Start workers for batch processing
-	startWorkers(3)
+	// Start workers
+	startWriteWorkers(3, 5)
+	startReadWorkers(5, 10)
 
 	// Set up HTTP router
 	router := mux.NewRouter()
@@ -60,6 +66,7 @@ func main() {
 	})
 	handler := corsHandler.Handler(router)
 
+	// Start the HTTP server
 	fmt.Printf("Starting server on port %s...\n", *port)
 	err := http.ListenAndServe(":"+*port, handler)
 	if err != nil {
@@ -96,37 +103,57 @@ func initDB() {
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 }
 
-func startWorkers(numWorkers int) {
-	for i := 0; i < numWorkers; i++ {
-		go func(workerID int) {
-			batchSize := 200
-			ticker := time.NewTicker(5 * time.Millisecond)
-			defer ticker.Stop()
+func startWriteWorkers(baseWorkers int, maxWorkers int) {
+	workerCount := baseWorkers
 
-			var urls []URL
-			var mutex sync.Mutex
+	// Start initial workers
+	for i := 0; i < workerCount; i++ {
+		go writeWorker(i)
+	}
 
-			for {
-				select {
-				case url := <-urlQueue:
-					mutex.Lock()
-					urls = append(urls, url)
-					if len(urls) >= batchSize {
-						batchInsert(urls)
-						urls = nil
-					}
-					mutex.Unlock()
-
-				case <-ticker.C:
-					mutex.Lock()
-					if len(urls) > 0 {
-						batchInsert(urls)
-						urls = nil
-					}
-					mutex.Unlock()
-				}
+	// Automatically scale workers based on queue length
+	go func() {
+		for {
+			time.Sleep(1 * time.Second) // Check queue every second
+			queueLen := len(writeQueue)
+			if queueLen > len(writeQueue)/2 && workerCount < maxWorkers {
+				//fmt.Printf("Scaling up write workers: %d -> %d\n", workerCount, workerCount+1)
+				go writeWorker(workerCount)
+				workerCount++
 			}
-		}(i)
+		}
+	}()
+}
+
+func writeWorker(workerID int) {
+	batchSize := 200
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	var urls []URL
+	var mutex sync.Mutex
+
+	fmt.Printf("Write worker %d started\n", workerID)
+
+	for {
+		select {
+		case url := <-writeQueue:
+			mutex.Lock()
+			urls = append(urls, url)
+			if len(urls) >= batchSize {
+				batchInsert(urls)
+				urls = nil
+			}
+			mutex.Unlock()
+
+		case <-ticker.C:
+			mutex.Lock()
+			if len(urls) > 0 {
+				batchInsert(urls)
+				urls = nil
+			}
+			mutex.Unlock()
+		}
 	}
 }
 
@@ -140,7 +167,7 @@ func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resultChan := make(chan string)
-	urlQueue <- URL{URL: url, ResultChan: resultChan}
+	writeQueue <- URL{URL: url, ResultChan: resultChan}
 	newID := <-resultChan
 
 	response := map[string]string{"id": newID}
@@ -180,33 +207,131 @@ func batchInsert(urls []URL) {
 	}
 }
 
+func startReadWorkers(baseWorkers int, maxWorkers int) {
+	workerCount := baseWorkers
+
+	// Tạo readWorker ban đầu
+	for i := 0; i < workerCount; i++ {
+		go readWorker()
+	}
+
+	// Tự động mở rộng readWorker khi tải tăng
+	go func() {
+		for {
+			time.Sleep(1 * time.Second) // Kiểm tra hàng đợi mỗi giây
+			queueLen := len(readQueue)
+			if queueLen > len(readQueue)/2 && workerCount < maxWorkers {
+				//fmt.Printf("Scaling up workers: %d -> %d\n", workerCount, workerCount+1)
+				go readWorker()
+				workerCount++
+			}
+		}
+	}()
+}
+
+func readWorker() {
+	for req := range readQueue {
+		id := req.ID
+		result := make(map[string]string)
+
+		// Kiểm tra trạng thái xử lý ID trong sync.Map
+		ch, loaded := getOrCreateChannel(id)
+		if loaded {
+			// Một readWorker khác đang xử lý ID này -> chờ tín hiệu
+			resultData := <-ch
+			if resultData == "" {
+				result["error"] = "URL not found"
+			} else {
+				result["originalUrl"] = resultData
+			}
+			req.ResultChan <- result
+			continue
+		}
+
+		// Worker này sẽ xử lý ID
+		// fmt.Printf("Worker %d processing ID: %s\n", workerID, id)
+
+		// Truy vấn cơ sở dữ liệu
+		var url URL
+		if dbErr := DB.Where("id = ?", id).First(&url).Error; dbErr != nil {
+			result["error"] = "URL not found"
+			notifyChannel(id, "") // Gửi kết quả lỗi qua channel
+		} else {
+			result["originalUrl"] = url.URL
+			_ = RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err() // Cập nhật cache
+			notifyChannel(id, url.URL)                                 // Gửi kết quả thành công qua channel
+		}
+
+		req.ResultChan <- result
+		closeChannel(id) // Đóng channel sau khi xử lý xong
+	}
+}
+
 func GetLink(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := mux.Vars(r)["id"]
 
+	// Check Redis cache first
 	data, err := RedisClient.Get(ctx, id).Result()
 	if err == nil {
 		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
 		return
 	}
 
-	if !errors.Is(err, redis.Nil) {
-		http.Error(w, "Redis error", http.StatusInternalServerError)
-		return
+	// Cache miss: Create a ResultChan from the pool
+	resultChan := channelPool.Get().(chan map[string]string)
+	defer func() {
+		// Return the channel to the pool after use
+		channelPool.Put(resultChan)
+	}()
+
+	// Add the request to the read queue
+	readQueue <- ReadRequest{
+		ID:         id,
+		ResultChan: resultChan,
 	}
 
-	var url URL
-	if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
-		http.Error(w, "URL not found", http.StatusNotFound)
-		return
+	// Wait for the result from the readWorker
+	select {
+	case result := <-resultChan:
+		// Receive the result from the readWorker
+		if errorMsg, exists := result["error"]; exists {
+			// Friendly message if the URL is not found
+			if errorMsg == "URL not found" {
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": errorMsg})
+			} else {
+				http.Error(w, errorMsg, http.StatusInternalServerError)
+			}
+		} else {
+			_ = json.NewEncoder(w).Encode(result)
+		}
+	case <-time.After(3*time.Second + 500*time.Millisecond): // Timeout to protect the HTTP handler
+		http.Error(w, "Request timed out", http.StatusGatewayTimeout)
 	}
+}
 
-	if err := RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err(); err != nil {
-		http.Error(w, "Failed to cache URL", http.StatusInternalServerError)
-		return
+var idProcessing sync.Map // Map quản lý trạng thái xử lý từng ID
+var channelPool = sync.Pool{
+	New: func() interface{} {
+		return make(chan map[string]string, 1) // Buffer 1 để tránh chặn
+	},
+}
+
+func getOrCreateChannel(id string) (chan string, bool) {
+	ch, loaded := idProcessing.LoadOrStore(id, make(chan string, 1)) // Channel có buffer 1
+	return ch.(chan string), loaded
+}
+
+func notifyChannel(id string, data string) {
+	if ch, ok := idProcessing.Load(id); ok {
+		ch.(chan string) <- data // Gửi tín hiệu qua channel
 	}
+}
 
-	_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": url.URL})
+func closeChannel(id string) {
+	if ch, ok := idProcessing.LoadAndDelete(id); ok {
+		close(ch.(chan string))
+	}
 }
 
 func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
