@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -12,14 +11,9 @@ import (
 
 func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
-		return
-	}
-	url := strings.TrimSpace(string(body))
+	url := strings.TrimSpace(r.URL.Query().Get("url"))
 	if url == "" {
-		http.Error(w, "URL is required in the body", http.StatusBadRequest)
+		http.Error(w, "URL parameter is required", http.StatusBadRequest)
 		return
 	}
 	resultChan := make(chan string)

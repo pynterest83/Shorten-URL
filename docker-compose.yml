@@ -1,0 +1,104 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: postgres_container
+    environment:
+      POSTGRES_USER: shortenurl
+      POSTGRES_PASSWORD: shortenurl
+      POSTGRES_DB: shortenurl
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortenurl"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-7000:
+    image: redis:latest
+    container_name: redis_7000
+    command: redis-server /usr/local/etc/redis/redis-7000.conf
+    ports:
+      - "7000:7000"
+    volumes:
+      - ./backend/Redis/redis-7000.conf:/usr/local/etc/redis/redis-7000.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7000", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-7001:
+    image: redis:latest
+    container_name: redis_7001
+    command: redis-server /usr/local/etc/redis/redis-7001.conf
+    ports:
+      - "7001:7001"
+    volumes:
+      - ./backend/Redis/redis-7001.conf:/usr/local/etc/redis/redis-7001.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7001", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-7002:
+    image: redis:latest
+    container_name: redis_7002
+    command: redis-server /usr/local/etc/redis/redis-7002.conf
+    ports:
+      - "7002:7002"
+    volumes:
+      - ./backend/Redis/redis-7002.conf:/usr/local/etc/redis/redis-7002.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7002", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-7100:
+    image: redis:latest
+    container_name: redis_7100
+    command: redis-server /usr/local/etc/redis/redis-7100.conf
+    ports:
+      - "7100:7100"
+    volumes:
+      - ./backend/Redis/redis-7100.conf:/usr/local/etc/redis/redis-7100.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7100", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-7101:
+    image: redis:latest
+    container_name: redis_7101
+    command: redis-server /usr/local/etc/redis/redis-7101.conf
+    ports:
+      - "7101:7101"
+    volumes:
+      - ./backend/Redis/redis-7101.conf:/usr/local/etc/redis/redis-7101.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7101", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-7102:
+    image: redis:latest
+    container_name: redis_7102
+    command: redis-server /usr/local/etc/redis/redis-7102.conf
+    ports:
+      - "7102:7102"
+    volumes:
+      - ./backend/Redis/redis-7102.conf:/usr/local/etc/redis/redis-7102.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7102", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

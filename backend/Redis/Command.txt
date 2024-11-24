@@ -6,18 +6,16 @@ redis-cli -p 7101 shutdown
 redis-cli -p 7102 shutdown
 
 redis-cli -p 7000 FLUSHALL
-redis-cli -p 7000 CLUSTER RESET HARD
-
 redis-cli -p 7001 FLUSHALL
-redis-cli -p 7001 CLUSTER RESET HARD
-
 redis-cli -p 7002 FLUSHALL
+
+redis-cli -p 7000 CLUSTER RESET HARD
+redis-cli -p 7001 CLUSTER RESET HARD
 redis-cli -p 7002 CLUSTER RESET HARD
 
 redis-cli -p 7100 CLUSTER RESET HARD
 redis-cli -p 7101 CLUSTER RESET HARD
 redis-cli -p 7102 CLUSTER RESET HARD
-
 
 
 redis-server redis-7000.conf
