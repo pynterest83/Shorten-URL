@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   postgres:
     image: postgres:latest
@@ -24,6 +26,9 @@ services:
       --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7000:7000"
+      - "17000:17000"
+    depends_on:
+      - postgres
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7000", "ping"]
       interval: 10s
@@ -38,6 +43,7 @@ services:
       --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7001:7001"
+      - "17001:17001"
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7001", "ping"]
       interval: 10s
@@ -52,6 +58,7 @@ services:
       --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7002:7002"
+      - "17002:17002"
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7002", "ping"]
       interval: 10s
@@ -66,6 +73,7 @@ services:
       --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7100:7100"
+      - "17100:17100"
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7100", "ping"]
       interval: 10s
@@ -80,6 +88,7 @@ services:
       --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7101:7101"
+      - "17101:17101"
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7101", "ping"]
       interval: 10s
@@ -94,11 +103,33 @@ services:
       --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7102:7102"
+      - "17102:17102"
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7102", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  redis-init:
+    image: redis:latest
+    container_name: redis_init
+    depends_on:
+      - redis-7000
+      - redis-7001
+      - redis-7002
+      - redis-7100
+      - redis-7101
+      - redis-7102
+    entrypoint: >
+      sh -c "
+      sleep 10 &&
+      redis-cli -p 7000 CLUSTER RESET HARD &&
+      redis-cli -p 7001 CLUSTER RESET HARD &&
+      redis-cli -p 7002 CLUSTER RESET HARD &&
+      redis-cli -p 7100 CLUSTER RESET HARD &&
+      redis-cli -p 7101 CLUSTER RESET HARD &&
+      redis-cli -p 7102 CLUSTER RESET HARD
+      "
 
 volumes:
   postgres_data:
