@@ -9,6 +9,32 @@ function URLShortener() {
 
   useEffect(() => {
     const storedURLs = JSON.parse(localStorage.getItem('shortenedURLList'));
+    console.log(storedURLs);
+    if (!storedURLs) {
+      return;
+    }
+    for (let i = 0; i < storedURLs.length; i++) {
+      // Check if the stored URL is still valid
+      const requestUrl = `http://localhost:8080/short/${storedURLs[i].shortId}`;
+      fetch(requestUrl)
+        .then((response) => {
+          // response is alwasys 200 even if the URL is not found
+          // if URL is not found, the response will be {"message":"URL not found"}
+          // if response = {"message":"URL not found"}, then remove the URL from the list and remove it from local storage
+          if (response.ok) {
+            response.json().then((data) => {
+              if (data.message === "URL not found") {
+                storedURLs.splice(i, 1);
+                setShortenedURLList(storedURLs);
+                localStorage.setItem('shortenedURLList', JSON.stringify(storedURLs));
+              }
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Error checking URL:", error);
+        });
+    }
     if (storedURLs && Array.isArray(storedURLs)) {
       setShortenedURLList(storedURLs);
     }
@@ -36,7 +62,8 @@ function URLShortener() {
       });
 
       if (response.ok) {
-        const newID = await response.text();
+        const res = await response.text()
+        const newID = JSON.parse(res).id;
         const shortened = `http://localhost:3000/short/${newID}`;
         const newShortenedURL = { fullUrl: url, shortUrl: shortened, shortId: newID };
         setShortenedURLList([...shortenedURLList, newShortenedURL]);
