@@ -2,235 +2,352 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-
+	"math/big"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/alphadose/haxmap"
-	"github.com/google/uuid"
-	"github.com/julienschmidt/httprouter"
+	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
-var RedisClient *redis.Client
-var DB *gorm.DB
-var ctx = context.Background()
-var WorkerTasks = haxmap.New[string, *WorkerTask]()
+var (
+	RedisClient *redis.Client
+	DB          *gorm.DB
+	ctx         = context.Background()
+	writeQueue  = make(chan URL, 5000)         // Queue for batch processing
+	readQueue   = make(chan ReadRequest, 5000) // Queue for read requests
+)
 
-// URL model for GORM
 type URL struct {
-	ID  string `gorm:"primary_key"`
-	URL string `gorm:"not null"`
+	ID         string      `gorm:"primary_key"`
+	URL        string      `gorm:"not null"`
+	ResultChan chan string `gorm:"-"` // Used for communicating results
 }
 
-var urlQueue = make(chan URL, 1000) // Channel hàng đợi với buffer 1000
+type ReadRequest struct {
+	ID         string
+	ResultChan chan map[string]string
+}
 
 func main() {
-	// Port flag
-	port := flag.Int("port", 8080, "Port to run the server on")
+	// Parse command-line flags
+	port := flag.String("port", "8080", "Port for the server to listen on")
 	flag.Parse()
 
+	// Initialize Redis client
+	initRedis()
+
+	// Initialize PostgreSQL connection
+	initDB()
+
+	// Start workers
+	startWriteWorkers(3, 5)
+	startReadWorkers(5, 10)
+
+	// Set up HTTP router
+	router := mux.NewRouter()
+	router.HandleFunc("/short/{id}", GetLink).Methods("GET")
+	router.HandleFunc("/create", ShortenURL).Methods("POST")
+	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE")
+	router.HandleFunc("/delete-urls", DeleteURLs).Methods("DELETE")
+
+	// Set up CORS
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowCredentials: true,
+	})
+	handler := corsHandler.Handler(router)
+
+	// Start the HTTP server
+	fmt.Printf("Starting server on port %s...\n", *port)
+	err := http.ListenAndServe(":"+*port, handler)
+	if err != nil {
+		return
+	}
+}
+
+func initRedis() {
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
 
 	if _, err := RedisClient.Ping(ctx).Result(); err != nil {
-		panic(err)
+		panic(fmt.Sprintf("Failed to connect to Redis: %v", err))
 	}
+}
 
+func initDB() {
 	var err error
-	DB, err = gorm.Open(postgres.Open("host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"))
-	if err != nil {
-		panic(err)
-	}
-
-	for i := 0; i < 3; i++ {
-		go processQueue()
-	}
-
-	router := httprouter.New()
-	router.GET("/short/:id", GetLink)
-	router.POST("/create", ShortenURL)
-	router.DELETE("/delete-all", deleteAllURLsHandler)
-	router.DELETE("/delete-urls", DeleteURLs)
-
-	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:80"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowCredentials: true,
-		AllowedHeaders:   []string{"Content-Type"},
+	dsn := "host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"
+	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		PrepareStmt:            true,
+		SkipDefaultTransaction: true,
 	})
-	handler := corsHandler.Handler(router)
-
-	// Create server with configured port
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", *port),
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+	if err != nil {
+		panic(fmt.Sprintf("Failed to connect to PostgreSQL: %v", err))
 	}
 
-	// Start server in goroutine
+	// Configure connection pool
+	sqlDB, _ := DB.DB()
+	sqlDB.SetMaxOpenConns(50)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+}
+
+func startWriteWorkers(baseWorkers int, maxWorkers int) {
+	workerCount := baseWorkers
+
+	// Start initial workers
+	for i := 0; i < workerCount; i++ {
+		go writeWorker(i)
+	}
+
+	// Automatically scale workers based on queue length
 	go func() {
-		log.Printf("Starting server on port %d", *port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
+		for {
+			time.Sleep(1 * time.Second) // Check queue every second
+			queueLen := len(writeQueue)
+			if queueLen > len(writeQueue)/2 && workerCount < maxWorkers {
+				//fmt.Printf("Scaling up write workers: %d -> %d\n", workerCount, workerCount+1)
+				go writeWorker(workerCount)
+				workerCount++
+			}
 		}
 	}()
-
-	// Wait for interrupt signal
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	<-stop
-
-	// Graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
-	}
 }
 
-type WorkerTask struct {
-	waiters []chan<- []byte
-	mutex   sync.Mutex
-}
-
-func MergeRequest(id string, channel chan<- []byte) {
-	task, exist := WorkerTasks.GetOrSet(id, &WorkerTask{
-		waiters: make([]chan<- []byte, 0),
-	})
-	task.mutex.Lock()
-	task.waiters = append(task.waiters, channel)
-	task.mutex.Unlock()
-	if !exist {
-		go TaskStart(id, task)
-	}
-
-}
-
-func TaskStart(id string, task *WorkerTask) {
-	var result []byte
-	data, err := RedisClient.Get(ctx, id).Result()
-	if err != nil {
-		var url URL
-		if err := DB.Where("id = ?", id).First(&url).Error; err != nil {
-			result = nil
-		} else {
-			result = []byte(url.URL)
-			// Set cache with a 24-hour expiration time
-			_ = RedisClient.Set(ctx, id, url.URL, 24*time.Hour).Err()
-		}
-	} else {
-		result = []byte(data)
-	}
-	time.Sleep(10 * time.Millisecond)
-	WorkerTasks.Del(id)
-	for _, waiter := range task.waiters {
-		waiter <- result
-	}
-}
-
-// GetLink handles the request to fetch the original URL based on the shortened ID
-func GetLink(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
-	w.Header().Set("Content-Type", "application/json")
-	id := ps.ByName("id")
-	var waiter sync.WaitGroup
-	waiter.Add(1)
-	go func() {
-		defer waiter.Done()
-		returnValue := make(chan []byte)
-		MergeRequest(id, returnValue)
-		result := <-returnValue
-
-		// Return JSON response
-		response := map[string]string{
-			"originalUrl": string(result),
-		}
-		json.NewEncoder(w).Encode(response)
-	}()
-	waiter.Wait()
-}
-
-// ShortenURL handles the request to shorten a given URL
-func ShortenURL(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	w.Header().Set("Content-Type", "text/plain")
-	url := r.FormValue("url")
-	if url == "" {
-		w.WriteHeader(400) // Bad Request if no URL is provided
-		return
-	}
-
-	// Generate a new unique ID for the shortened URL
-	newID := makeID()
-
-	// Đưa bản ghi vào hàng đợi thay vì ghi trực tiếp vào cơ sở dữ liệu
-	urlRecord := URL{ID: newID, URL: url}
-	urlQueue <- urlRecord // Đưa vào hàng đợi
-
-	// Trả về ID của URL rút gọn ngay lập tức
-	_, _ = w.Write([]byte(newID))
-}
-
-// processQueue xử lý các yêu cầu từ hàng đợi và ghi vào cơ sở dữ liệu
-func processQueue() {
-	batchSize := 500
-	ticker := time.NewTicker(1500 * time.Millisecond)
+func writeWorker(workerID int) {
+	batchSize := 200
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	var urls []URL
+	var mutex sync.Mutex
+
+	fmt.Printf("Write worker %d started\n", workerID)
 
 	for {
 		select {
-		case url := <-urlQueue:
+		case url := <-writeQueue:
+			mutex.Lock()
 			urls = append(urls, url)
-
-			// Nếu đạt đến kích thước batch, ghi tất cả vào DB
 			if len(urls) >= batchSize {
 				batchInsert(urls)
-				urls = urls[:0] // Reset lại slice sau khi ghi
+				urls = nil
 			}
+			mutex.Unlock()
+
 		case <-ticker.C:
-			// Ghi bất cứ bản ghi nào còn lại vào cuối mỗi giây
+			mutex.Lock()
 			if len(urls) > 0 {
 				batchInsert(urls)
-				urls = urls[:0]
+				urls = nil
 			}
+			mutex.Unlock()
 		}
 	}
 }
 
-var totalInserts int
+func ShortenURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 
-// batchInsert thực hiện batch insert vào cơ sở dữ liệu
+	url := r.FormValue("url")
+	if url == "" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+
+	resultChan := make(chan string)
+	writeQueue <- URL{URL: url, ResultChan: resultChan}
+	newID := <-resultChan
+
+	response := map[string]string{"id": newID}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
 func batchInsert(urls []URL) {
-	if err := DB.Create(&urls).Error; err != nil {
-		// Log lỗi nếu batch insert thất bại
-		println("Batch insert failed:", err.Error())
-	} else {
-		totalInserts += len(urls)
-		println("Total URLs inserted:", totalInserts)
+	const maxRetries = 5
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		for i := range urls {
+			urls[i].ID = makeID()
+		}
+
+		tx := DB.Begin()
+		if err := tx.Create(&urls).Error; err != nil {
+			tx.Rollback()
+			fmt.Printf("Batch insert failed on attempt %d: %v\n", attempt, err)
+			continue
+		}
+
+		if err := tx.Commit().Error; err != nil {
+			fmt.Printf("Failed to commit transaction: %v\n", err)
+		} else {
+			for _, url := range urls {
+				if url.ResultChan != nil {
+					url.ResultChan <- url.ID
+				}
+			}
+			return
+		}
+	}
+
+	for _, url := range urls {
+		if url.ResultChan != nil {
+			url.ResultChan <- "error"
+		}
 	}
 }
 
-// makeID generates a random alphanumeric string of the specified length
-func makeID() string {
-	return uuid.New().String()
+func startReadWorkers(baseWorkers int, maxWorkers int) {
+	workerCount := baseWorkers
+
+	// Tạo readWorker ban đầu
+	for i := 0; i < workerCount; i++ {
+		go readWorker()
+	}
+
+	// Tự động mở rộng readWorker khi tải tăng
+	go func() {
+		for {
+			time.Sleep(1 * time.Second) // Kiểm tra hàng đợi mỗi giây
+			queueLen := len(readQueue)
+			if queueLen > len(readQueue)/2 && workerCount < maxWorkers {
+				//fmt.Printf("Scaling up workers: %d -> %d\n", workerCount, workerCount+1)
+				go readWorker()
+				workerCount++
+			}
+		}
+	}()
 }
 
-func deleteAllURLsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func readWorker() {
+	for req := range readQueue {
+		id := req.ID
+		result := make(map[string]string)
+
+		// Kiểm tra trạng thái xử lý ID trong sync.Map
+		ch, loaded := getOrCreateChannel(id)
+		if loaded {
+			// Một readWorker khác đang xử lý ID này -> chờ tín hiệu
+			resultData := <-ch
+			if resultData == "" {
+				result["error"] = "URL not found"
+			} else {
+				result["originalUrl"] = resultData
+			}
+			req.ResultChan <- result
+			continue
+		}
+
+		// Worker này sẽ xử lý ID
+		// fmt.Printf("Worker %d processing ID: %s\n", workerID, id)
+
+		// Truy vấn cơ sở dữ liệu
+		var url URL
+		if dbErr := DB.Where("id = ?", id).First(&url).Error; dbErr != nil {
+			result["error"] = "URL not found"
+			notifyChannel(id, "") // Gửi kết quả lỗi qua channel
+		} else {
+			result["originalUrl"] = url.URL
+			_ = RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err() // Cập nhật cache
+			notifyChannel(id, url.URL)                                 // Gửi kết quả thành công qua channel
+		}
+
+		req.ResultChan <- result
+		closeChannel(id) // Đóng channel sau khi xử lý xong
+	}
+}
+
+func GetLink(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := mux.Vars(r)["id"]
+
+	// Check Redis cache first
+	data, err := RedisClient.Get(ctx, id).Result()
+	if err == nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"originalUrl": data})
+		return
+	}
+
+	// Cache miss: Create a ResultChan from the pool
+	resultChan := channelPool.Get().(chan map[string]string)
+	defer func() {
+		// Return the channel to the pool after use
+		channelPool.Put(resultChan)
+	}()
+
+	// Add the request to the read queue
+	readQueue <- ReadRequest{
+		ID:         id,
+		ResultChan: resultChan,
+	}
+
+	// Wait for the result from the readWorker
+	select {
+	case result := <-resultChan:
+		// Receive the result from the readWorker
+		if errorMsg, exists := result["error"]; exists {
+			// Friendly message if the URL is not found
+			if errorMsg == "URL not found" {
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": errorMsg})
+			} else {
+				http.Error(w, errorMsg, http.StatusInternalServerError)
+			}
+		} else {
+			_ = json.NewEncoder(w).Encode(result)
+		}
+	case <-time.After(3*time.Second + 500*time.Millisecond): // Timeout to protect the HTTP handler
+		http.Error(w, "Request timed out", http.StatusGatewayTimeout)
+	}
+}
+
+var idProcessing sync.Map // Map quản lý trạng thái xử lý từng ID
+var channelPool = sync.Pool{
+	New: func() interface{} {
+		return make(chan map[string]string, 1) // Buffer 1 để tránh chặn
+	},
+}
+
+func getOrCreateChannel(id string) (chan string, bool) {
+	ch, loaded := idProcessing.LoadOrStore(id, make(chan string, 1)) // Channel có buffer 1
+	return ch.(chan string), loaded
+}
+
+func notifyChannel(id string, data string) {
+	if ch, ok := idProcessing.Load(id); ok {
+		ch.(chan string) <- data // Gửi tín hiệu qua channel
+	}
+}
+
+func closeChannel(id string) {
+	if ch, ok := idProcessing.LoadAndDelete(id); ok {
+		close(ch.(chan string))
+	}
+}
+
+func makeID() string {
+	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	id := make([]byte, 6)
+	for i := range id {
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		id[i] = charset[num.Int64()]
+	}
+	return string(id)
+}
+
+func deleteAllURLsHandler(w http.ResponseWriter, r *http.Request) {
+	// Call deleteAllRecords to delete all records in both the database and cache
 	if err := deleteAllRecords(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("Failed to delete records"))
@@ -241,15 +358,25 @@ func deleteAllURLsHandler(w http.ResponseWriter, r *http.Request, _ httprouter.P
 }
 
 func deleteAllRecords() error {
+	// Delete all records from PostgreSQL
 	if err := DB.Unscoped().Where("1 = 1").Delete(&URL{}).Error; err != nil {
+		log.Printf("Failed to delete records from database: %v", err)
 		return err
 	}
-	println("All records deleted from URL table")
+	log.Println("All records deleted from PostgreSQL")
+
+	// Delete all keys from Redis
+	if err := RedisClient.FlushDB(ctx).Err(); err != nil {
+		log.Printf("Failed to delete all keys from Redis: %v", err)
+		return err
+	}
+	log.Println("All keys deleted from Redis")
+
 	return nil
 }
 
 // DeleteURLs handles the request to delete multiple URLs by their IDs
-func DeleteURLs(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func DeleteURLs(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 
 	// Decode JSON array of IDs from the request body
