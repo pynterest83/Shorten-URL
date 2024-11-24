@@ -19,11 +19,11 @@ services:
   redis-7000:
     image: redis:latest
     container_name: redis_7000
-    command: redis-server /usr/local/etc/redis/redis-7000.conf
+    command: >
+      redis-server --port 7000 --cluster-enabled yes --cluster-config-file nodes-7000.conf 
+      --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7000:7000"
-    volumes:
-      - ./backend/Redis/redis-7000.conf:/usr/local/etc/redis/redis-7000.conf
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7000", "ping"]
       interval: 10s
@@ -33,11 +33,11 @@ services:
   redis-7001:
     image: redis:latest
     container_name: redis_7001
-    command: redis-server /usr/local/etc/redis/redis-7001.conf
+    command: >
+      redis-server --port 7001 --cluster-enabled yes --cluster-config-file nodes-7001.conf 
+      --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7001:7001"
-    volumes:
-      - ./backend/Redis/redis-7001.conf:/usr/local/etc/redis/redis-7001.conf
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7001", "ping"]
       interval: 10s
@@ -47,11 +47,11 @@ services:
   redis-7002:
     image: redis:latest
     container_name: redis_7002
-    command: redis-server /usr/local/etc/redis/redis-7002.conf
+    command: >
+      redis-server --port 7002 --cluster-enabled yes --cluster-config-file nodes-7002.conf 
+      --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7002:7002"
-    volumes:
-      - ./backend/Redis/redis-7002.conf:/usr/local/etc/redis/redis-7002.conf
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7002", "ping"]
       interval: 10s
@@ -61,11 +61,11 @@ services:
   redis-7100:
     image: redis:latest
     container_name: redis_7100
-    command: redis-server /usr/local/etc/redis/redis-7100.conf
+    command: >
+      redis-server --port 7100 --cluster-enabled yes --cluster-config-file nodes-7100.conf 
+      --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7100:7100"
-    volumes:
-      - ./backend/Redis/redis-7100.conf:/usr/local/etc/redis/redis-7100.conf
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7100", "ping"]
       interval: 10s
@@ -75,11 +75,11 @@ services:
   redis-7101:
     image: redis:latest
     container_name: redis_7101
-    command: redis-server /usr/local/etc/redis/redis-7101.conf
+    command: >
+      redis-server --port 7101 --cluster-enabled yes --cluster-config-file nodes-7101.conf 
+      --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7101:7101"
-    volumes:
-      - ./backend/Redis/redis-7101.conf:/usr/local/etc/redis/redis-7101.conf
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7101", "ping"]
       interval: 10s
@@ -89,11 +89,11 @@ services:
   redis-7102:
     image: redis:latest
     container_name: redis_7102
-    command: redis-server /usr/local/etc/redis/redis-7102.conf
+    command: >
+      redis-server --port 7102 --cluster-enabled yes --cluster-config-file nodes-7102.conf 
+      --cluster-node-timeout 5000 --appendonly yes --dir /data
     ports:
       - "7102:7102"
-    volumes:
-      - ./backend/Redis/redis-7102.conf:/usr/local/etc/redis/redis-7102.conf
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "7102", "ping"]
       interval: 10s

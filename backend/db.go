@@ -13,15 +13,21 @@ import (
 var DB *gorm.DB
 
 func initDB() {
-	var err error
 	dsn := "host=localhost user=shortenurl password=shortenurl dbname=shortenurl port=5432"
-	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+	var database *gorm.DB
+	var err error
+	database, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
 		PrepareStmt:            true,
 		SkipDefaultTransaction: true,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("Failed to connect to PostgreSQL: %v", err))
 	}
+	err = database.AutoMigrate(&URL{})
+	if err != nil {
+		panic(fmt.Sprintf("Failed to auto-migrate database: %v", err))
+	}
+	DB = database
 
 	// Configure connection pool
 	sqlDB, _ := DB.DB()
