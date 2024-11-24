@@ -1,0 +1,31 @@
+redis-cli -p 7000 shutdown
+redis-cli -p 7001 shutdown
+redis-cli -p 7002 shutdown
+redis-cli -p 7100 shutdown
+redis-cli -p 7101 shutdown
+redis-cli -p 7102 shutdown
+
+redis-cli -p 7000 FLUSHALL
+redis-cli -p 7001 FLUSHALL
+redis-cli -p 7002 FLUSHALL
+
+redis-cli -p 7000 CLUSTER RESET HARD
+redis-cli -p 7001 CLUSTER RESET HARD
+redis-cli -p 7002 CLUSTER RESET HARD
+
+redis-cli -p 7100 CLUSTER RESET HARD
+redis-cli -p 7101 CLUSTER RESET HARD
+redis-cli -p 7102 CLUSTER RESET HARD
+
+
+redis-server redis-7000.conf
+redis-server redis-7001.conf
+redis-server redis-7002.conf
+redis-server redis-7100.conf
+redis-server redis-7101.conf
+redis-server redis-7102.conf
+
+redis-cli --cluster create \
+  127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+  127.0.0.1:7100 127.0.0.1:7101 127.0.0.1:7102 \
+  --cluster-replicas 1
