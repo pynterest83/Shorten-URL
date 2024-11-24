@@ -7,13 +7,42 @@ function URLShortener() {
   const [url, setUrl] = useState('');
   const [shortenedURLList, setShortenedURLList] = useState([]);
 
+  // Validate stored URLs on initial load
   useEffect(() => {
-    const storedURLs = JSON.parse(localStorage.getItem('shortenedURLList'));
-    if (storedURLs && Array.isArray(storedURLs)) {
-      setShortenedURLList(storedURLs);
-    }
-  }, []);
+    const validateURLs = async () => {
+      const storedURLs = JSON.parse(localStorage.getItem('shortenedURLList')) || [];
+      if (!Array.isArray(storedURLs)) return; // Ensure storedURLs is an array
 
+      const validatedURLs = [];
+
+      for (const urlData of storedURLs) {
+        try {
+          const response = await fetch(`http://localhost:8080/short/${urlData.shortId}`);
+          if (response.ok) {
+            const result = await response.json();
+            // Check if originalUrl exists and is non-empty
+            if (result && result.originalUrl !== "") {
+              validatedURLs.push(urlData); // Add valid URLs to the list
+            } else {
+              console.warn(`URL with ID ${urlData.shortId} has an empty originalUrl.`);
+            }
+          } else {
+            console.warn(`URL with ID ${urlData.shortId} returned status ${response.status}`);
+          }
+        } catch (error) {
+          console.error(`Error validating URL with ID ${urlData.shortId}:`, error);
+        }
+      }
+
+      setShortenedURLList(validatedURLs);
+      localStorage.setItem('shortenedURLList', JSON.stringify(validatedURLs));
+    };
+
+    validateURLs();
+  }, []); // Empty dependency array ensures this runs once on mount
+
+
+  // Update localStorage when shortenedURLList changes
   useEffect(() => {
     if (shortenedURLList.length > 0) {
       localStorage.setItem('shortenedURLList', JSON.stringify(shortenedURLList));
@@ -22,7 +51,7 @@ function URLShortener() {
 
   const handleShorten = async () => {
     if (!url) {
-      alert("Please enter a URL to shorten.");
+      alert('Please enter a URL to shorten.');
       return;
     }
 
@@ -42,11 +71,11 @@ function URLShortener() {
         setShortenedURLList([...shortenedURLList, newShortenedURL]);
         setUrl('');
       } else {
-        alert("Failed to shorten the URL. Please try again.");
+        alert('Failed to shorten the URL. Please try again.');
       }
     } catch (error) {
-      console.error("Error shortening the URL:", error);
-      alert("An error occurred. Please try again.");
+      console.error('Error shortening the URL:', error);
+      alert('An error occurred. Please try again.');
     }
   };
 
@@ -61,20 +90,20 @@ function URLShortener() {
           },
           body: JSON.stringify(ids),
         });
-        
+
         if (response.ok) {
           setShortenedURLList([]);
           localStorage.removeItem('shortenedURLList');
         } else {
-          alert("Failed to delete URLs. Please try again.");
+          alert('Failed to delete URLs. Please try again.');
         }
       } catch (error) {
-        console.error("Error deleting URLs:", error);
-        alert("An error occurred. Please try again.");
+        console.error('Error deleting URLs:', error);
+        alert('An error occurred. Please try again.');
       }
     }
   };
-  
+
   const handleShare = (shortId) => {
     if (navigator.share) {
       navigator.share({
@@ -111,11 +140,11 @@ function URLShortener() {
           localStorage.removeItem('shortenedURLList'); // Clear storage if list is empty
         }
       } else {
-        alert("Failed to delete URL. Please try again.");
+        alert('Failed to delete URL. Please try again.');
       }
     } catch (error) {
-      console.error("Error deleting URL:", error);
-      alert("An error occurred. Please try again.");
+      console.error('Error deleting URL:', error);
+      alert('An error occurred. Please try again.');
     }
   };
 
@@ -237,8 +266,8 @@ function RedirectShort() {
           setError('URL not found');
         }
       } catch (err) {
-        console.error('Redirect error:', err);
-        setError('Failed to fetch URL');
+        console.error(err);
+        setError('An error occurred');
       } finally {
         setLoading(false);
       }
@@ -247,15 +276,12 @@ function RedirectShort() {
     fetchOriginalUrl();
   }, [id]);
 
-  if (loading) {
-    return <div>Redirecting...</div>;
-  }
-
-  if (error) {
-    return <div>Error: {error}</div>;
-  }
-
-  return null;
+  return (
+    <div>
+      {loading && <div>Redirecting...</div>}
+      {error && <div>{error}</div>}
+    </div>
+  );
 }
 
 function App() {
