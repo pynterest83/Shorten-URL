@@ -17,6 +17,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    command: >
+      bash -c "
+      # Wait for PostgreSQL to start
+      until pg_isready -U shortenurl; do sleep 1; done;
+      # Create the partitioned table and partitions
+      psql -U shortenurl -d shortenurl -c \"
+      CREATE TABLE customers (
+          id SERIAL PRIMARY KEY,
+          status TEXT NOT NULL,
+          arr NUMERIC
+      ) PARTITION BY LIST (status);
+
+      CREATE TABLE cust_active PARTITION OF customers FOR VALUES IN ('ACTIVE');
+      CREATE TABLE cust_archived PARTITION OF customers FOR VALUES IN ('EXPIRED');
+      CREATE TABLE cust_others PARTITION OF customers DEFAULT;
+      \"
+      "
 
   redis-7000:
     image: redis:latest
@@ -120,16 +137,9 @@ services:
       - redis-7100
       - redis-7101
       - redis-7102
-    entrypoint: >
-      sh -c "
-      sleep 10 &&
-      redis-cli -p 7000 CLUSTER RESET HARD &&
-      redis-cli -p 7001 CLUSTER RESET HARD &&
-      redis-cli -p 7002 CLUSTER RESET HARD &&
-      redis-cli -p 7100 CLUSTER RESET HARD &&
-      redis-cli -p 7101 CLUSTER RESET HARD &&
-      redis-cli -p 7102 CLUSTER RESET HARD
-      "
+    volumes:
+      - ./init-redis-cluster.sh:/init-redis-cluster.sh
+    entrypoint: ["sh", "/init-redis-cluster.sh"]
 
 volumes:
   postgres_data:
