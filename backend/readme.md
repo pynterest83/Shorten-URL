@@ -17,3 +17,5 @@ The backend service is written in Go and provides the following functionalities:
    ```
 4. Run the application: `./launch.sh`.
 5. The backend service should now be running on `http://localhost:8080`.
+
+![Screenshot 2024-11-24 112120](https://github.com/user-attachments/assets/b5ebba6b-4ae1-422d-901f-e5b1f272d915)
