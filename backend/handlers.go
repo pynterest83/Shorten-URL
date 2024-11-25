@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -70,4 +71,38 @@ func deleteAllURLsHandler(w http.ResponseWriter, _ *http.Request) {
 	if err != nil {
 		return
 	}
+}
+
+func DeleteURLs(w http.ResponseWriter, r *http.Request) {
+	var ids []string
+
+	// Decode JSON array of IDs from the request body
+	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Invalid request format"))
+		return
+	}
+
+	if len(ids) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("No IDs provided"))
+		return
+	}
+
+	// Delete from Redis in a batch
+	if err := RedisClient.Del(ctx, ids...).Err(); err != nil {
+		log.Printf("Failed to delete from Redis: %v", err)
+	}
+
+	// Delete from PostgreSQL in a batch
+	if err := DB.Unscoped().Where("id IN ?", ids).Delete(&URL{}).Error; err != nil {
+		log.Printf("Failed to delete from database: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Failed to delete records"))
+		return
+	}
+
+	log.Printf("Records with IDs %v deleted successfully", ids)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Records deleted successfully"))
 }

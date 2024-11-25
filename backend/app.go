@@ -28,12 +28,12 @@ func main() {
 	router := mux.NewRouter()
 	router.HandleFunc("/short/{id}", GetLink).Methods("GET")
 	router.HandleFunc("/create", ShortenURL).Methods("POST")
-	router.HandleFunc("/delete-all", deleteAllURLsHandler).Methods("DELETE")
+	router.HandleFunc("/delete-urls", DeleteURLs).Methods("DELETE")
 
 	// Set up CORS
 	corsHandler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:3000"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowCredentials: true,
 	})
 	handler := corsHandler.Handler(router)
