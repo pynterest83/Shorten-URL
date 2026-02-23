@@ -168,9 +168,28 @@ func ShortenURL(w http.ResponseWriter, r *http.Request) {
 	resultChan := make(chan string)
 	writeQueue <- URL{URL: url, ResultChan: resultChan}
 	newID := <-resultChan
+resultChan := make(chan string, 1)
 
+select {
+case writeQueue <- URL{URL: url, ResultChan: resultChan}:
+	// queued
+case <-time.After(250 * time.Millisecond):
+	http.Error(w, "Server busy, try again", http.StatusServiceUnavailable)
+	return
+case <-r.Context().Done():
+	return
+}
+
+select {
+case newID := <-resultChan:
 	response := map[string]string{"id": newID}
 	_ = json.NewEncoder(w).Encode(response)
+case <-time.After(3 * time.Second):
+	http.Error(w, "Request timed out", http.StatusGatewayTimeout)
+	return
+case <-r.Context().Done():
+	return
+}
 }
 
 func batchInsert(urls []URL) {
