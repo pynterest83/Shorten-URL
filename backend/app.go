@@ -100,29 +100,26 @@ func initDB() {
 
 	// Configure connection pool
 	sqlDB, _ := DB.DB()
-	sqlDB.SetMaxOpenConns(50)
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-}
-
 func startWriteWorkers(baseWorkers int, maxWorkers int) {
+	var mu sync.Mutex
 	workerCount := baseWorkers
 
-	// Start initial workers
 	for i := 0; i < workerCount; i++ {
 		go writeWorker(i)
 	}
 
-	// Automatically scale workers based on queue length
 	go func() {
 		for {
-			time.Sleep(1 * time.Second) // Check queue every second
+			time.Sleep(1 * time.Second)
 			queueLen := len(writeQueue)
-			if queueLen > len(writeQueue)/2 && workerCount < maxWorkers {
-				//fmt.Printf("Scaling up write workers: %d -> %d\n", workerCount, workerCount+1)
+			threshold := cap(writeQueue) / 2
+
+			mu.Lock()
+			if queueLen > threshold && workerCount < maxWorkers {
 				go writeWorker(workerCount)
 				workerCount++
 			}
+			mu.Unlock()
 		}
 	}()
 }
