@@ -296,12 +296,11 @@ func GetLink(w http.ResponseWriter, r *http.Request) {
 	// Wait for the result from the readWorker
 	select {
 	case result := <-resultChan:
-		// Receive the result from the readWorker
-		if errorMsg, exists := result["error"]; exists {
-			// Friendly message if the URL is not found
-			if errorMsg == "URL not found" {
-				_ = json.NewEncoder(w).Encode(map[string]string{"message": errorMsg})
-			} else {
+	  if errorMsg, exists := result["error"]; exists {
+	    if errorMsg == "URL not found" {
+	      w.WriteHeader(http.StatusNotFound)
+	      _ = json.NewEncoder(w).Encode(map[string]string{"error": errorMsg})
+	    } else {
 				http.Error(w, errorMsg, http.StatusInternalServerError)
 			}
 		} else {
