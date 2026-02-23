@@ -231,41 +231,64 @@ func startReadWorkers(baseWorkers int, maxWorkers int) {
 	}()
 }
 
+type inflight struct {
+	waiters []chan string
+}
+
+var (
+	inflightMu sync.Mutex
+	inflightMap = map[string]*inflight{}
+)
+
 func readWorker() {
 	for req := range readQueue {
 		id := req.ID
-		result := make(map[string]string)
 
-		// Kiểm tra trạng thái xử lý ID trong sync.Map
-		ch, loaded := getOrCreateChannel(id)
-		if loaded {
-			// Một readWorker khác đang xử lý ID này -> chờ tín hiệu
-			resultData := <-ch
+		waitCh := make(chan string, 1)
+		leader := false
+
+		inflightMu.Lock()
+		if inf, ok := inflightMap[id]; ok {
+			inf.waiters = append(inf.waiters, waitCh)
+		} else {
+			inflightMap[id] = &inflight{waiters: []chan string{waitCh}}
+			leader = true
+		}
+		inflightMu.Unlock()
+
+		if !leader {
+			resultData := <-waitCh
 			if resultData == "" {
-				result["error"] = "URL not found"
+				req.ResultChan <- map[string]string{"error": "URL not found"}
 			} else {
-				result["originalUrl"] = resultData
+				req.ResultChan <- map[string]string{"originalUrl": resultData}
 			}
-			req.ResultChan <- result
 			continue
 		}
 
-		// Worker này sẽ xử lý ID
-		// fmt.Printf("Worker %d processing ID: %s\n", workerID, id)
-
-		// Truy vấn cơ sở dữ liệu
+		// leader does the DB lookup once
+		var out string
 		var url URL
-		if dbErr := DB.Where("id = ?", id).First(&url).Error; dbErr != nil {
-			result["error"] = "URL not found"
-			notifyChannel(id, "") // Gửi kết quả lỗi qua channel
-		} else {
-			result["originalUrl"] = url.URL
-			_ = RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err() // Cập nhật cache
-			notifyChannel(id, url.URL)                                 // Gửi kết quả thành công qua channel
+		if dbErr := DB.Where("id = ?", id).First(&url).Error; dbErr == nil {
+			out = url.URL
+			_ = RedisClient.Set(ctx, id, url.URL, 5*time.Minute).Err()
 		}
 
-		req.ResultChan <- result
-		closeChannel(id) // Đóng channel sau khi xử lý xong
+		inflightMu.Lock()
+		inf := inflightMap[id]
+		delete(inflightMap, id)
+		inflightMu.Unlock()
+
+		for _, ch := range inf.waiters {
+			ch <- out
+			close(ch)
+		}
+
+		if out == "" {
+			req.ResultChan <- map[string]string{"error": "URL not found"}
+		} else {
+			req.ResultChan <- map[string]string{"originalUrl": out}
+		}
 	}
 }
 
