@@ -36,7 +36,9 @@ function URLShortener() {
       });
 
       if (response.ok) {
-        const newID = await response.text();
+        const res = await response.text();
+        // res = {id: newID}
+        const newID = JSON.parse(res).id;
         const shortened = `http://localhost:3000/short/${newID}`;
         const newShortenedURL = { fullUrl: url, shortUrl: shortened, shortId: newID };
         setShortenedURLList([...shortenedURLList, newShortenedURL]);
